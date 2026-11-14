@@ -1,0 +1,23 @@
+# Conda environment for jupyterminal.
+#
+#   conda env update -n jupyterminal_env -f environment.yml
+#
+# Qt comes from the PyPI wheel (PySide6-Essentials) rather than the
+# conda-forge build: the wheel is abi3 and is known to work on Python 3.15.
+name: jupyterminal_env
+channels:
+  - conda-forge
+dependencies:
+  - python=3.15
+  - pip
+  # pip inside the env needs a CA bundle to reach PyPI.
+  - ca-certificates
+  - openssl
+  - pip:
+      - PySide6-Essentials>=6.8
+      # The tests, and the coverage every run of them measures.
+      - pytest>=8.4
+      - pytest-cov>=7.0.0
+      # The project itself, editable, so `jupyterminal` and
+      # `python -m jupyterminal` work straight from the checkout.
+      - -e .

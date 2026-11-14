@@ -1,0 +1,6 @@
+#  What jupyterminal needs to run: the same list as the dependencies in
+#  pyproject.toml. The release workflows do not install from here but
+#  from requirements-test.txt, the exact versions and hashes that
+#  bin/dev_tooling/lock_requirements.sh works out from this file and
+#  the 'test' group of pyproject.toml.
+PySide6-Essentials>=6.8

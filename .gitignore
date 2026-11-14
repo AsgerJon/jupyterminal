@@ -218,3 +218,12 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+#  Mutation runs: sessions, sandboxes and reports stay local.
+/bin/dev_tooling/mutation/runs/
+
+#  Scratch output, notes and abandoned work.
+/tmp/
+
+#  The IDE's own files.
+/.idea/

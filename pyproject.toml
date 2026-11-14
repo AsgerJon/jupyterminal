@@ -1,0 +1,66 @@
+[build-system]
+requires = ["setuptools>=77.0.0"]  # PEP 639 licence metadata
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jupyterminal"
+version = "0.0.0"
+description = "A terminal emulator whose session is a list of command blocks."
+readme = "README.md"
+#  3.12 is the first Python in which None, True and False cannot be freed.
+#  A Qt binding built for the newer Pythons takes references away from
+#  them on the older ones, and the interpreter ends within seconds: PySide6
+#  6.12.0 does so on 3.10 and 3.11 (PYSIDE-3474).
+requires-python = ">=3.12"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "Asger Jon Vistisen" }]
+keywords = ["terminal", "terminal-emulator", "zsh", "blocks"]
+classifiers = [
+    "Environment :: X11 Applications :: Qt",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Topic :: Terminals :: Terminal Emulators/X Terminals",
+]
+dependencies = ["PySide6-Essentials>=6.8"]
+
+[project.urls]
+Repository = "https://github.com/AsgerJon/jupyterminal"
+
+[project.gui-scripts]
+jupyterminal = "jupyterminal.app:main"
+
+#  The development tools, installed with 'pip install --group dev' by pip
+#  25.1 or later. environment.yml installs the same packages.
+[dependency-groups]
+test = [
+    "pytest>=8.4",
+    "pytest-cov>=7.0.0",
+]
+dev = [
+    { include-group = "test" },
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+jupyterminal = ["shell/zsh/*.zsh"]
+
+#  Coverage is measured on every run, of the package and of the tests
+#  themselves, so a test that never runs shows up as well. The release
+#  workflows refuse a release candidate or a release below 100%. The
+#  mutation runner replaces 'addopts' and 'pythonpath' to switch coverage
+#  off and to import its own copy of 'src'.
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-q --cov=jupyterminal --cov=tests --cov-branch --cov-report=term-missing:skip-covered"
+markers = [
+    "live: starts a real zsh on a pseudo-terminal; these tests run last",
+]
+#  A test that takes this many seconds ends the whole run: a shell that
+#  never answers must not hold a release workflow for hours.
+faulthandler_timeout = 120
+faulthandler_exit_on_timeout = true
