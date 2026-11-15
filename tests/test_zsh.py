@@ -275,9 +275,16 @@ def test_a_table_in_color_copies_as_its_text(shell):
 def test_python_repl_lives_in_one_block(shell):
     live = shell()
     block = live.start("python3 -q")
-    live.pump(lambda: any(">>>" in line for line in block.lines()))
+
+    def ends_with(*lines: str) -> bool:
+        return [line.rstrip() for line in block.lines()][-len(lines):] == \
+            list(lines)
+
+    # (Each line is typed when Python asks for it: one typed sooner would
+    # be echoed by the terminal driver too, in front of the prompt.)
+    assert live.pump(lambda: ends_with(">>>"))
     live.type("6 * 7\r")
-    live.pump(lambda: "42" in block.lines())
+    assert live.pump(lambda: ends_with("42", ">>>"))
     live.type("exit()\r")
     live.wait_prompt()
     assert len(commands(live.session)) == 1

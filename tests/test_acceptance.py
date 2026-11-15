@@ -325,10 +325,20 @@ def test_10_python_repl_in_one_block(live_window):
     type_line(live, "python3 -q")
     assert live.wait(lambda: live.session.running is not None)
     block = live.session.running
-    assert live.wait(lambda: any(">>>" in line for line in block.lines()))
+
+    def asked(times: int) -> bool:
+        """Python has shown its prompt this many times, and waits at the
+        last one.  A line typed before that is echoed by the terminal
+        driver as well, in front of the prompt, as in any terminal."""
+        lines = block.lines()
+        return sum(line.startswith(">>>") for line in lines) == times \
+            and lines[-1].rstrip() == ">>>"
+
+    assert live.wait(lambda: asked(1))
     type_line(live, "greeting = 'hello'")
+    assert live.wait(lambda: asked(2))
     type_line(live, "print(greeting * 2)")
-    assert live.wait(lambda: "hellohello" in block.lines())
+    assert live.wait(lambda: "hellohello" in block.lines() and asked(3))
     assert block.running and len(live.session.blocks) == count + 1
     type_line(live, "exit()")
     assert live.wait(live.at_prompt)
