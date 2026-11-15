@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jupyterminal"
-version = "0.0.1-dev0"
+version = "0.0.1-rc0"
 description = "A terminal emulator whose session is a list of command blocks."
 readme = "README.md"
 #  3.12 is the first Python in which None, True and False cannot be freed.
