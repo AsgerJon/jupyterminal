@@ -48,9 +48,10 @@ class TestVersionStamp(unittest.TestCase):
   """
   The publish job of every button stamps the version it is about to
   publish into the files that show one: the build reads it from
-  'pyproject.toml', the program says it, the README is headed by it, and
-  the package for Arch Linux fetches the release by it. Every test works
-  on a copy of that layout, never on the files of the repository.
+  'pyproject.toml', the program says it and the README is headed by it.
+  The package for Arch Linux fetches a release by it, and follows the
+  releases alone. Every test works on a copy of that layout, never on
+  the files of the repository.
   """
 
   def setUp(self) -> None:
@@ -98,28 +99,31 @@ class TestVersionStamp(unittest.TestCase):
     self.assertEqual(self.read('README.md'), str.replace(
       README, '# jupyterminal v0.0.0',
       '# jupyterminal v1.2.3-dev4 (development build)'))
+    #  The package for Arch Linux goes on installing the last release.
+    self.assertEqual(self.read('packaging', 'arch', 'PKGBUILD'), PKGBUILD)
+
+  def test_candidate_and_release(self) -> None:
+    code, output = self.stamp('1.2.3-rc0')
+    self.assertEqual(code, 0, output)
+    self.assertIn('\n# jupyterminal v1.2.3-rc0 (release candidate)\n',
+                  self.read('README.md'))
+    self.assertIn('version = "1.2.3-rc0"\n', self.read('pyproject.toml'))
+    self.assertEqual(self.read('packaging', 'arch', 'PKGBUILD'), PKGBUILD)
+    code, output = self.stamp('1.2.3')
+    self.assertEqual(code, 0, output)
+    self.assertIn('\n# jupyterminal v1.2.3\n', self.read('README.md'))
+    self.assertIn('version = "1.2.3"\n', self.read('pyproject.toml'))
     #  The one line, and nothing of the comment or of the lines that use
     #  what it sets.
     self.assertEqual(self.read('packaging', 'arch', 'PKGBUILD'),
                      str.replace(PKGBUILD, '\n_tag=0.0.0\n',
-                                 '\n_tag=1.2.3-dev4\n'))
-
-  def test_candidate_and_release(self) -> None:
-    for version, heading in (
-        ('1.2.3-rc0', '# jupyterminal v1.2.3-rc0 (release candidate)'),
-        ('1.2.3', '# jupyterminal v1.2.3'),
-    ):
-      code, output = self.stamp(version)
-      self.assertEqual(code, 0, output)
-      self.assertIn('\n%s\n' % heading, self.read('README.md'))
-      self.assertIn('\n_tag=%s\n' % version,
-                    self.read('packaging', 'arch', 'PKGBUILD'))
-      self.assertIn('version = "%s"\n' % version,
-                    self.read('pyproject.toml'))
+                                 '\n_tag=1.2.3\n'))
 
   def test_a_file_without_its_line_stops_the_press(self) -> None:
     self.write(str.replace(PKGBUILD, '_tag=0.0.0\n', ''),
                'packaging', 'arch', 'PKGBUILD')
+    code, output = self.stamp('1.2.3-rc1')       # which leaves it alone
+    self.assertEqual(code, 0, output)
     code, output = self.stamp('1.2.3')
     self.assertEqual(code, 4)
     self.assertIn("Found no line starting with '_tag='", output)
@@ -135,9 +139,9 @@ class TestVersionStamp(unittest.TestCase):
 
 class TestPackageForArch(unittest.TestCase):
   """
-  The PKGBUILD of the repository installs the release the repository
-  itself names, and gives it a version that pacman puts in the right
-  place among the others.
+  The PKGBUILD of the repository installs a release the repository has
+  reached, and gives it a version that pacman puts in the right place
+  among the others.
   """
 
   @staticmethod
@@ -145,15 +149,37 @@ class TestPackageForArch(unittest.TestCase):
     with open(os.path.join(ROOT, *parts), encoding='utf-8') as handle:
       return str.split(handle.read(), '\n')
 
-  def test_the_tag_is_the_version_of_the_repository(self) -> None:
+  @staticmethod
+  def place(version: str) -> tuple:
+    """Where a version stands among the others: the development builds
+    of a version come before its release candidates, and those before
+    the release."""
+    numbers, _, build = str.partition(version, '-')
+    major, minor, micro = (int(number) for number in
+                           str.split(numbers, '.'))
+    for rank, kind in enumerate(('dev', 'rc')):
+      if str.startswith(build, kind):
+        return major, minor, micro, rank, int(build[len(kind):])
+    return major, minor, micro, 2, 0
+
+  def test_the_order_of_versions(self) -> None:
+    versions = ['0.0.1-dev0', '0.0.1-dev1', '0.0.1-dev10', '0.0.1-rc0',
+                '0.0.1-rc2', '0.0.1', '0.0.2-dev0', '0.1.0', '1.0.0-rc0']
+    self.assertEqual(sorted(reversed(versions), key=self.place), versions)
+
+  def test_the_tag_is_not_ahead_of_the_repository(self) -> None:
+    """Only the release buttons write the tag, so it names the newest
+    release, or, until there is one, the first development build: never
+    a version the repository has not reached."""
     tags = [line for line in self.lines('packaging', 'arch', 'PKGBUILD')
             if str.startswith(line, '_tag=')]
     versions = [line for line in self.lines('pyproject.toml')
-                if str.startswith(line, 'version')]
+                if str.startswith(line, 'version = "')]
     self.assertEqual(len(tags), 1)
     self.assertEqual(len(versions), 1)
-    self.assertEqual('version = "%s"' % tags[0][len('_tag='):],
-                     versions[0])
+    tag = tags[0][len('_tag='):]
+    version = versions[0][len('version = "'):-1]
+    self.assertLessEqual(self.place(tag), self.place(version))
 
   def test_pacman_is_told_what_to_say(self) -> None:
     """Removing the package takes everything it installed; the script

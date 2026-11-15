@@ -147,9 +147,10 @@ jobs:
 
       # Write VERSION_INFO into pyproject.toml (the build reads its
       # version from there), into src/jupyterminal/__init__.py (so
-      # 'jupyterminal.__version__' matches the published version), into
-      # the README.md heading and into packaging/arch/PKGBUILD (the
-      # package for Arch Linux installs the release by its tag).
+      # 'jupyterminal.__version__' matches the published version) and
+      # into the README.md heading.  The version of a release goes into
+      # packaging/arch/PKGBUILD as well: the package for Arch Linux
+      # installs the newest release by its tag, and no build before it.
       - name: Stamp version into pyproject, package, README and PKGBUILD
         run: python bin/release_tooling/version_stamp.py VERSION_INFO
 

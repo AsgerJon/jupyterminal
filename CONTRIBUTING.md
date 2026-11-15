@@ -196,15 +196,16 @@ before the press, and every press locks all nine again.
 
 Before it publishes, a workflow runs the suite on every supported
 Python and measures the coverage. It stamps the version into
-`pyproject.toml`, `src/jupyterminal/__init__.py`, the heading of
-`README.md` and `packaging/arch/PKGBUILD`, so none of the four is edited
-by hand, and neither is `VERSION`. Until the first release they read
-0.0.0.
+`pyproject.toml`, `src/jupyterminal/__init__.py` and the heading of
+`README.md`, so none of the three is edited by hand, and neither is
+`VERSION`. Until the first release the three read 0.0.0.
 
 `packaging/arch/PKGBUILD` is the package for Arch Linux. It is kept in
 this repository and not in the AUR, and it installs the release whose
-tag the workflow stamped into it: from `main` that is always the newest
-one. pacman takes the full stop in `0.0.1.dev0` for a sign of a later
+tag is stamped into it. Only the `lts` buttons stamp it, so from `main`
+it always installs the newest release and never a development build or
+a release candidate; until the first release it names the first
+development build. pacman takes the full stop in `0.0.1.dev0` for a sign of a later
 version than `0.0.1`, so the package names a development build
 `0.0.1dev0` and a release candidate `0.0.1rc0`. `pacman -R` removes
 everything the package installed; `jupyterminal.install` beside the

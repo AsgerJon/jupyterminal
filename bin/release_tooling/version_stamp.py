@@ -6,11 +6,13 @@ a version to the outside world:
 - 'README.md': the heading line starting with '# jupyterminal v'.
 - 'packaging/arch/PKGBUILD': the '_tag=' line, which names the release
   the package for Arch Linux installs by the tag the workflow gives it.
+  The package follows the releases alone: a development build and a
+  release candidate leave the line as it is.
 
 The version string is read from the environment variable named by the
 first argument, defaulting to 'VERSION_INFO'. The release workflows call
 'version_get.py' to export the resolved version under that name, then
-call this script to write it into the four files before building.
+call this script to write it into the files before building.
 
 The README heading derives a human-readable qualifier from the version
 string itself: a version containing '-rc' is marked '(release
@@ -193,11 +195,30 @@ def _readmeHeading(versionStr: str) -> str:
   return '%s%s' % (README_PREFIX, versionStr)
 
 
+def _isRelease(versionStr: str) -> bool:
+  """
+  This function tells a release from the builds that lead up to it: the
+  version of a release is a plain 'X.Y.Z', that of a release candidate
+  'X.Y.Z-rcN' and that of a development build 'X.Y.Z-devN'.
+
+  Parameters
+  ----------
+  versionStr : str
+    The version string.
+
+  Returns
+  -------
+  bool
+    True for the version of a release.
+  """
+  return '-' not in versionStr
+
+
 def _stampAll(versionStr: str) -> None:
   """
   This function stamps the given version string into 'pyproject.toml',
-  'src/jupyterminal/__init__.py', 'README.md' and
-  'packaging/arch/PKGBUILD'.
+  'src/jupyterminal/__init__.py' and 'README.md', and the version of a
+  release, a plain 'X.Y.Z', into 'packaging/arch/PKGBUILD' as well.
 
   Parameters
   ----------
@@ -213,7 +234,8 @@ def _stampAll(versionStr: str) -> None:
   _stampPrefix(pyprojectPath, 'version', 'version = "%s"' % versionStr)
   _stampPrefix(packagePath, '__version__', "__version__ = '%s'" % versionStr)
   _stampPrefix(readmePath, README_PREFIX, _readmeHeading(versionStr))
-  _stampPrefix(pkgbuildPath, '_tag=', '_tag=%s' % versionStr)
+  if _isRelease(versionStr):
+    _stampPrefix(pkgbuildPath, '_tag=', '_tag=%s' % versionStr)
 
 
 def main(*args: str, ) -> int:

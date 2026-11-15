@@ -48,8 +48,10 @@ curl -O https://raw.githubusercontent.com/AsgerJon/jupyterminal/main/packaging/a
 makepkg -si
 ```
 
-The same lines install a newer release once there is one, and
-`sudo pacman -Rns jupyterminal` removes the program again, with
+The package follows the releases: the same lines install the newest one,
+and until the first release the first development build. A development
+build or a release candidate in between does not change what they
+install. `sudo pacman -Rns jupyterminal` removes the program again, with
 everything the package installed. Your own settings in
 `~/.config/jupyterminal` are not the package's and stay. The recipe is
 kept here and not in the AUR.

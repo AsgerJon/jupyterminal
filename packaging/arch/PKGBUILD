@@ -7,14 +7,16 @@
 #   makepkg -si
 #
 # installs the release named below, and later the one that is the newest
-# by then.  The program is removed like every package:
+# by then: the releases alone, no development build and no release
+# candidate.  The program is removed like every package:
 #
 #   sudo pacman -Rns jupyterminal
 
 pkgname=jupyterminal
-# The release this installs, by its tag on GitHub.  The release workflows
-# write this line; nothing else in this file changes from one release to
-# the next.
+# The release this installs, by its tag on GitHub.  The workflow that
+# publishes a release writes this line; nothing else in this file changes
+# from one release to the next.  Until the first release it names the
+# first development build, since there is nothing else to install.
 _tag=0.0.1-dev0
 # pacman takes 0.0.1dev0 and 0.0.1rc0 for older than 0.0.1, and
 # 0.0.1.dev0 for newer.
