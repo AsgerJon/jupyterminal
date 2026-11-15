@@ -15,7 +15,7 @@ from jupyterminal.config import Config
 from jupyterminal.session import FilterSpec, Session
 from jupyterminal.ui import view as view_module
 from jupyterminal.ui.view import (FindState, Geo, TerminalView, _duration,
-                                  _short_path)
+                                  short_path)
 
 
 class FakePty:
@@ -74,17 +74,17 @@ def test_a_duration_reads_like_a_stopwatch(seconds, text):
 
 def test_a_path_under_the_home_directory_is_shortened(monkeypatch):
     monkeypatch.setenv("HOME", "/home/u")
-    assert _short_path("/home/u") == "~"
-    assert _short_path("/home/u/src/x") == "~/src/x"
-    assert _short_path("/home/user2") == "/home/user2"   # only a prefix
-    assert _short_path("/etc") == "/etc"
+    assert short_path("/home/u") == "~"
+    assert short_path("/home/u/src/x") == "~/src/x"
+    assert short_path("/home/user2") == "/home/user2"   # only a prefix
+    assert short_path("/etc") == "/etc"
 
 
 def test_a_home_at_the_root_shortens_no_other_path(monkeypatch):
     monkeypatch.setenv("HOME", "/")
-    assert _short_path("/") == "~"
-    assert _short_path("/etc") == "/etc"
-    assert _short_path("//net/share") == "//net/share"
+    assert short_path("/") == "~"
+    assert short_path("/etc") == "/etc"
+    assert short_path("//net/share") == "//net/share"
 
 
 def test_a_fresh_layout_record_is_empty():

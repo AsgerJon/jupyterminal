@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import os
+import shlex
 import subprocess
 import time
 
 import pytest
 
 from conftest import SMI_COPIED, SMI_PROGRAMS, SMI_TEXT, install_smi
+from test_zsh_configs import DISTRIBUTION_ZSHRC
 from jupyterminal.session import (BACKGROUND, BOTH, CLOSED, FilterSpec,
                                   copy_text, output_text)
 
@@ -480,3 +482,486 @@ def test_mashing_ctrl_c_never_swallows_the_next_key(shell):
         block = live.run(f"echo ok{attempt}")
         assert block.command == f"echo ok{attempt}", attempt
         assert output_text(block) == f"ok{attempt}"
+
+
+# -- the text box asks the line editor ----------------------------------------
+
+TAB, UP, DOWN = b"\t", b"\x1b[A", b"\x1b[B"
+FALLBACK = {TAB: "expand-or-complete", UP: "up-line-or-history",
+            DOWN: "down-line-or-history"}
+FILES = {"alpha.txt": "x\n", "alphabet.txt": "x\n", "beta.txt": "x\n"}
+
+
+class Asking:
+    """Hands text to the line editor of a live shell and takes what it
+    answers, as the text box does."""
+
+    def __init__(self, live) -> None:
+        self.live = live
+        self.session = live.session
+        self.answers: list[tuple] = []
+        self.session.on_edited = \
+            lambda text, cursor: self.answers.append((text, cursor))
+        #: What the plugins made of a text: the text, how it might go
+        #: on, its colors.
+        self.hints: list[tuple] = []
+        self.session.on_hints = lambda *said: self.hints.append(said)
+        live.wait_prompt()
+
+    def send(self, key: bytes, text: str, cursor: int | None = None) -> None:
+        cursor = len(text) if cursor is None else cursor
+        assert self.session.ask_editor(key, FALLBACK.get(key, ""), text,
+                                       cursor)
+
+    def ask(self, key: bytes, text: str, cursor: int | None = None) -> tuple:
+        before = len(self.answers)
+        self.send(key, text, cursor)
+        assert self.live.pump(lambda: len(self.answers) > before, 10.0), \
+            "no answer"
+        self.live.idle(0.1)
+        return self.answers[-1]
+
+    def again(self, key: bytes) -> tuple:
+        """The same key once more, on what the last answer was."""
+        return self.ask(key, *self.answers[-1])
+
+    def look(self, text: str) -> tuple:
+        """How the plugins would go on from ``text``, and its colors."""
+        before = len(self.hints)
+        self.session.look(text, len(text))
+        assert self.live.pump(lambda: len(self.hints) > before, 10.0), \
+            "no hints"
+        assert self.hints[-1][0] == text
+        return self.hints[-1][1:]
+
+    def run(self, command: str):
+        """Hand a command over as the text box does; its block."""
+        session = self.session
+        before = len(commands(session))
+        assert session.run_command(command)
+        assert self.live.pump(lambda: len(commands(session)) > before
+                              and self.live.at_prompt()), command
+        return commands(session)[-1]
+
+
+def test_the_line_editor_completes_what_it_is_handed(shell):
+    box = Asking(shell(files=FILES))
+    assert box.ask(TAB, "ls be") == ("ls beta.txt ", 12)
+    assert box.ask(TAB, "ls al") == ("ls alpha", 8)  # as far as they agree
+    assert box.session.listed() == (1, 0)
+    assert box.again(TAB) == ("ls alpha", 8)         # now it lists them
+    assert box.session.listed() == (1, 1)
+    assert box.live.input_text().split("\n")[1].split() == \
+        ["alpha.txt", "alphabet.txt"]
+    assert box.again(TAB) == ("ls alpha.txt", 12)    # and takes turns
+    assert box.again(TAB) == ("ls alphabet.txt", 15)
+    # In the middle of a line, and of several lines.
+    assert box.ask(TAB, "ls be; echo done", 5) == \
+        ("ls beta.txt ; echo done", 12)
+    assert box.ask(TAB, "echo x\nls be\necho y", 12) == \
+        ("echo x\nls beta.txt \necho y", 19)
+    assert box.ask(TAB, "ls zz") == ("ls zz", 5)     # nothing to add
+    # None of it was run, and the editor is as ready as before: a command
+    # handed over takes the place of what it was last asked about.
+    session = box.session
+    assert commands(session) == [] and session.input_ready
+    assert box.run("echo ok").lines() == ["ok"]
+    assert [b.command for b in commands(session)] == ["echo ok"]
+
+
+def test_the_line_editor_walks_through_its_history(shell):
+    box = Asking(shell())
+    for command in ("echo one", "echo two"):
+        box.live.run(command)
+    assert box.ask(UP, "dra") == ("echo two", 8)
+    assert box.again(UP) == ("echo one", 8)
+    assert box.again(UP) == ("echo one", 8)          # there is none older
+    assert box.again(DOWN) == ("echo two", 8)
+    assert box.again(DOWN) == ("dra", 3)             # what was being typed
+    assert box.again(DOWN) == ("dra", 3)
+    # Thrown away on purpose: the walk starts over, from an empty line.
+    assert box.ask(UP, "dra") == ("echo two", 8)
+    assert box.again(UP) == ("echo one", 8)
+    assert box.ask(UP, "") == ("echo two", 8)
+    assert box.again(DOWN) == ("", 0)
+
+
+def test_a_key_does_in_the_text_box_what_it_is_bound_to_in_the_shell(shell):
+    box = Asking(shell(
+        "PS1='%% '\n"
+        "autoload -Uz up-line-or-beginning-search "
+        "down-line-or-beginning-search\n"
+        "zle -N up-line-or-beginning-search\n"
+        "zle -N down-line-or-beginning-search\n"
+        "bindkey '^[[A' up-line-or-beginning-search\n"
+        "bindkey '^[[B' down-line-or-beginning-search\n"
+        "bindkey '^I' self-insert\n", files=FILES))
+    for command in ("echo one", "true", "echo two", "false"):
+        box.live.run(command)
+    # Up looks for lines that begin as this one does, and goes on doing
+    # so: the widget finds itself to have been the last one used.
+    assert box.ask(UP, "ec")[0] == "echo two"
+    assert box.again(UP)[0] == "echo one"
+    assert box.again(DOWN)[0] == "echo two"
+    assert box.again(DOWN) == ("ec", 2)
+    # A key that only types itself in the shell falls back on the widget
+    # the request names; with none named, nothing happens.
+    assert box.ask(TAB, "ls be") == ("ls beta.txt ", 12)
+    assert box.ask(b"\x1b[Z", "ls be") == ("ls be", 5)
+
+
+#: A common way to search the history from the arrow keys: two widgets
+#: that share a function.  It tells by its name which way to go, and by
+#: the name of the widget used before whether to go on from there.
+SEARCHING = (
+    "PS1='%% '\n"
+    "autoload -Uz history-search-end\n"
+    "zle -N history-beginning-search-backward-end history-search-end\n"
+    "zle -N history-beginning-search-forward-end history-search-end\n"
+    "bindkey '^[[A' history-beginning-search-backward-end\n"
+    "bindkey '^[[B' history-beginning-search-forward-end\n")
+LEFT, BACKSPACE = b"\x1b[D", b"\x7f"
+
+
+class Typing:
+    """Types at the prompt of a live shell, the way one does in any
+    terminal, and reads text and cursor off the line editor's line (one
+    line, behind a prompt of two characters)."""
+
+    def __init__(self, live) -> None:
+        self.live = live
+
+    def type(self, keys: str | bytes) -> tuple:
+        self.live.type(keys)
+        self.live.idle(0.25)
+        line = self.live.input_text().split("\n")[0]
+        return line[2:], self.live.session.input.cx - 2
+
+
+def both(shell, rc: str, ran: tuple = (), **kwargs) -> tuple:
+    """Two shells of the same configuration and history: one to type in,
+    one for the text box to ask."""
+    typing, box = Typing(shell(rc, **kwargs)), Asking(shell(rc, **kwargs))
+    for live in (typing.live, box.live):
+        for command in ran:
+            live.run(command)
+    return typing, box
+
+
+RAN = ("echo three", "echo one", "true", "echo two", "false")
+
+
+def test_a_key_follows_the_one_before_it_as_at_the_prompt(shell):
+    typing, box = both(shell, SEARCHING, RAN)
+    typing.type("ec")
+    typed = [typing.type(key) for key in (UP, UP, UP, UP, DOWN, DOWN, DOWN)]
+    assert typed == [("echo two", 8), ("echo one", 8), ("echo three", 10),
+                     ("echo three", 10), ("echo one", 8), ("echo two", 8),
+                     ("ec", 2)]
+    asked = [box.ask(UP, "ec")] + [
+        box.again(key) for key in (UP, UP, UP, DOWN, DOWN, DOWN)]
+    assert asked == typed
+
+
+def test_what_was_done_in_between_counts_as_at_the_prompt(shell):
+    typing, box = both(shell, SEARCHING, RAN, files=FILES)
+    # Another key in between: the search starts anew from the whole line.
+    typing.type("ec")
+    typed = [typing.type(key) for key in (UP, TAB, UP)]
+    assert typed == [("echo two", 8)] * 3
+    assert [box.ask(UP, "ec"), box.again(TAB), box.again(UP)] == typed
+    # The cursor was moved: what stands before it is looked for.
+    typed = [typing.type(key) for key in (LEFT * 3, UP)]
+    assert typed == [("echo two", 5), ("echo one", 8)]
+    assert box.ask(UP, "echo two", 5) == typed[-1]
+    # Something was typed and taken away again: the text is the same, and
+    # still the key before it is not followed.  (Following it would have
+    # found the next line that begins with "echo ".)
+    typed = [typing.type(key) for key in ("x", BACKSPACE, UP)]
+    assert typed[1:] == [("echo one", 8), ("echo one", 8)]
+    box.session.look("echo onex", 9)
+    box.session.look("echo one", 8)
+    assert box.ask(UP, "echo one", 8) == typed[-1]
+    # Left alone now, it is searched on from where the search before the
+    # typing had got to.
+    typed = typing.type(UP)
+    assert typed == ("echo three", 10) and box.again(UP) == typed
+
+
+def test_a_menu_of_completions_is_walked_as_at_the_prompt(shell):
+    typing, box = both(shell, "PS1='%% '\n", files=FILES)
+    typing.type("ls al")
+    typed = [typing.type(key) for key in (TAB, TAB, TAB, TAB)]
+    assert typed == [("ls alpha", 8), ("ls alpha", 8),
+                     ("ls alpha.txt", 12), ("ls alphabet.txt", 15)]
+    asked = [box.ask(TAB, "ls al")] + [box.again(TAB) for _ in range(3)]
+    assert asked == typed
+    # Typing ends the walk, even if it leaves the text as it was: the
+    # next Tab completes the word that is there.
+    typed = [typing.type(key) for key in ("x", BACKSPACE, TAB)]
+    assert typed[-1] == ("ls alphabet.txt", 16)     # a blank behind it
+    box.session.look("ls alphabet.txtx", 16)
+    box.session.look("ls alphabet.txt", 15)
+    assert box.again(TAB) == ("ls alphabet.txt ", 16)
+
+
+def test_the_line_editor_asks_before_it_lists_very_many(shell):
+    box = Asking(shell(files={f"file{i:03}.txt": "" for i in range(150)}))
+    assert box.ask(TAB, "ls fi") == ("ls file", 7)
+    box.send(TAB, "ls file")
+    session = box.session
+    assert box.live.pump(lambda: session.shell_asks, 10.0)
+    assert session.editing and not session.input_ready
+    assert "do you wish to see all 150 possibilities" in box.live.input_text()
+    box.live.type("n")                               # the answer is its own
+    assert box.live.pump(lambda: not session.editing, 10.0)
+    assert box.answers[-1] == ("ls file", 7)
+    assert session.input_ready and not session.shell_asks
+
+
+def test_a_menu_of_the_line_editor_is_worked_with_its_own_keys(shell):
+    box = Asking(shell(
+        "PS1='%% '\nzmodload zsh/complist\n"
+        "autoload -Uz compinit && compinit -u -d $HOME/.zcompdump\n"
+        "zstyle ':completion:*' menu select\n", files=FILES))
+    assert box.ask(TAB, "ls al") == ("ls alpha", 8)
+    assert box.again(TAB) == ("ls alpha", 8)         # the list
+    box.send(TAB, "ls alpha")                        # the menu: no answer
+    session = box.session
+    assert box.live.pump(lambda: session.shell_asks, 10.0)
+    assert "ls alpha.txt" in box.live.input_text()   # its first entry
+    box.live.type(b"\x1b[C")                         # to the next one
+    assert box.live.pump(
+        lambda: "ls alphabet.txt" in box.live.input_text(), 10.0)
+    box.live.type("\r")                              # take it
+    assert box.live.pump(lambda: not session.editing, 10.0)
+    assert box.answers[-1] == ("ls alphabet.txt ", 16)
+    assert commands(session) == []                   # nothing was run
+
+
+def test_an_interrupt_ends_a_request_that_takes_too_long(shell):
+    box = Asking(shell("PS1='%% '\nslow() { sleep 30 }\nzle -N slow\n"
+                       "bindkey '^I' slow\n"))
+    session = box.session
+    box.send(TAB, "ls al", 3)
+    box.live.idle(0.3)
+    assert session.editing and box.answers == []     # it is still at it
+    began = time.monotonic()
+    box.live.type(b"\x03")
+    assert box.live.pump(lambda: not session.editing, 10.0)
+    assert time.monotonic() - began < 5.0
+    assert box.answers == [("ls al", 3)]             # the text, as it was
+    box.live.wait_prompt()
+    assert commands(session) == []
+    assert box.ask(UP, "") == ("", 0)                # and it works again
+
+
+# -- what the plugins of the configuration make of a command line -------------
+
+#: Stand-ins for the two plugins the text box asks, with the interface of
+#: the real ones.  zsh-autosuggestions goes on with a line the way the
+#: newest line of the history that begins like it does ...
+SUGGESTING = r"""
+_zsh_autosuggest_fetch_suggestion() {
+  emulate -L zsh
+  typeset -g suggestion=${history[(r)${(b)1}*]}
+}
+"""
+#: ... and zsh-syntax-highlighting gives the name of a command its color:
+#: green if there is such a command, red if there is none.  (What begins
+#: with a P is about the prompt, and is not passed on.)
+COLORING = r"""
+_zsh_highlight() {
+  emulate -L zsh
+  local name=${BUFFER%%[[:space:]]*}
+  local style='fg=red,bold'
+  (( $+commands[$name] + $+builtins[$name] )) && style='fg=green'
+  region_highlight=("0 $#name $style memo=stand-in" "P0 1 standout")
+  (( $#BUFFER > $#name )) &&
+    region_highlight+=("$(( $#name + 1 )) $#BUFFER none")
+}
+"""
+STAND_INS = SUGGESTING + COLORING
+
+
+def installed(name: str) -> str:
+    """The file a plugin is loaded from, where it is installed on this
+    machine: by Oh My Zsh or by a package.  Nothing where it is not."""
+    places = [os.path.join(os.environ.get("ZSH")
+                           or os.path.expanduser("~/.oh-my-zsh"),
+                           "custom", "plugins"),
+              "/usr/share/zsh/plugins", "/usr/share", "/usr/local/share",
+              "/opt/homebrew/share"]
+    files = [os.path.join(place, name, name + ".zsh") for place in places]
+    return next(filter(os.path.isfile, files), "")
+
+
+#: The stand-ins, and the real plugins as well where both are installed.
+REAL = [installed("zsh-autosuggestions"), installed("zsh-syntax-highlighting")]
+PLUGINS = [STAND_INS] + [
+    "".join(f"source {shlex.quote(path)}\n" for path in REAL)] * all(REAL)
+PLUGIN_IDS = ["stand-ins", "installed"][:len(PLUGINS)]
+
+
+def test_a_shell_without_such_plugins_is_not_asked(shell):
+    box = Asking(shell("PS1='%% '\n"))
+    session = box.session
+    assert session.hinting is False
+    session.look("echo o", 6)
+    box.live.idle(0.3)
+    assert box.hints == [] and box.live.input_text() == "%"
+    # Every prompt says it anew: a plugin may be loaded at any time, and
+    # a text that was waiting is looked at then.
+    box.run("_zsh_highlight() { region_highlight=('0 4 bold') }")
+    assert session.hinting is True
+    assert box.live.pump(lambda: box.hints, 10.0)
+    assert box.hints == [("echo o", "", [(0, 4, "bold")])]
+    assert box.live.pump(lambda: box.live.input_text() == "% echo o", 10.0)
+
+
+@pytest.mark.parametrize("plugin, suggestion, colors", [
+    (SUGGESTING, "echo one two", []),
+    (COLORING, "", [(0, 4, "fg=green"), (5, 6, "none")])])
+def test_either_plugin_alone_says_its_part(shell, plugin, suggestion, colors):
+    box = Asking(shell("PS1='%% '\n" + plugin))
+    box.live.run("echo one two")
+    assert box.session.hinting is True
+    assert box.look("echo o") == (suggestion, colors)
+
+
+@pytest.mark.parametrize("plugins", PLUGINS, ids=PLUGIN_IDS)
+def test_the_plugins_say_how_a_line_goes_on_and_color_it(shell, plugins):
+    box = Asking(shell("PS1='%% '\n" + plugins, files=FILES))
+    ran = ["echo one two", "ls beta.txt alpha.txt", "true"]
+    for command in ran:
+        box.live.run(command)
+    assert box.session.hinting is True
+    suggestion, colors = box.look("echo o")
+    assert suggestion == "echo one two" and (0, 4, "fg=green") in colors
+    assert box.look("tr")[0] == "true"
+    assert box.look("nosuch") == ("", [(0, 6, "fg=red,bold")])
+    # The line editor has the text it looked at, and draws it after it
+    # has answered.
+    assert box.live.pump(lambda: box.live.input_text() == "% nosuch", 10.0)
+    # What a key makes of the text comes with what they say about that.
+    assert box.ask(TAB, "ls be") == ("ls beta.txt ", 12)
+    text, suggestion, colors = box.hints[-1]
+    assert (text, suggestion) == ("ls beta.txt ", "ls beta.txt alpha.txt")
+    assert (0, 2, "fg=green") in colors
+    # zsh-autosuggestions shows what it suggests behind the line editor's
+    # text.  Here the text box does that: nothing follows the text there,
+    # where it would pass for something the key has listed.
+    box.live.idle(0.3)
+    assert box.live.input_text() == "% ls beta.txt"
+    assert box.session.listed() == (1, 0)
+    # A command is run as before, and nothing of all this was printed.
+    assert box.run("echo done").lines() == ["done"]
+    assert [b.command for b in commands(box.session)] == ran + ["echo done"]
+    assert background(box.session) == []
+
+
+def test_text_new_to_the_line_editor_starts_the_history_walk_over(shell):
+    box = Asking(shell("PS1='%% '\n" + STAND_INS))
+    for command in ("echo one", "echo two"):
+        box.live.run(command)
+    assert box.ask(UP, "") == ("echo two", 8)
+    assert box.again(UP) == ("echo one", 8)
+    # Typed on from there, and looked at: the text is the newest line now,
+    # and Up from it finds the newest command again.
+    assert box.look("echo onex") == ("", [(0, 4, "fg=green"), (5, 9, "none")])
+    assert box.ask(UP, "echo onex") == ("echo two", 8)
+    assert box.again(DOWN) == ("echo onex", 9)
+    assert box.hints[-1] == ("echo onex", "",
+                             [(0, 4, "fg=green"), (5, 9, "none")])
+    assert box.again(DOWN) == ("echo onex", 9)       # there is none newer
+
+
+def test_no_plugin_draws_behind_the_line_editors_text(shell):
+    """zsh-autosuggestions wraps itself around the widgets of the line
+    editor: it keeps each under another name and takes its place.  After
+    each of them it shows its suggestion behind the text, unless it has
+    been switched off.  The stand-in here does the same."""
+    box = Asking(shell(
+        "PS1='%% '\n" + STAND_INS +
+        "typeset -ga seen\n"
+        "wrapped() {\n"
+        "  seen+=($WIDGET:${+_ZSH_AUTOSUGGEST_DISABLED})\n"
+        "  zle kept-$WIDGET\n"
+        "  (( ${+_ZSH_AUTOSUGGEST_DISABLED} )) || POSTDISPLAY=' and so on'\n"
+        "}\n"
+        "for name in expand-or-complete end-of-history; do\n"
+        "  zle -A $name kept-$name\n"
+        "  zle -N $name wrapped\n"
+        "done\n"
+        "stubborn() { POSTDISPLAY=' and so forth' }\n"
+        "zle -N stubborn\n"
+        "bindkey '^[[Z' stubborn\n", files=FILES))
+    assert box.ask(TAB, "ls be") == ("ls beta.txt ", 12)
+    assert box.live.input_text() == "% ls beta.txt"
+    assert box.session.listed() == (1, 0)
+    # What some other widget puts there all the same is taken away.
+    assert box.ask(b"\x1b[Z", "ls be") == ("ls be", 5)
+    assert box.live.input_text() == "% ls be"
+    assert box.session.listed() == (1, 0)
+    # The plugin was switched off for the widget the key runs, and for no
+    # longer; going back to the newest line is zsh's own doing, wrapped
+    # in nothing.
+    block = box.run("print -r -- $seen ${+_ZSH_AUTOSUGGEST_DISABLED}")
+    assert block.lines() == ["expand-or-complete:1 0"]
+
+
+def test_the_text_box_asks_the_line_editor_of_a_distribution(shell):
+    """Debian and Ubuntu give every user the completion system and keys
+    that count on the terminal being in application mode.  The release
+    workflows run on such a machine, and so do many users."""
+    box = Asking(shell("PS1='%% '\n" + DISTRIBUTION_ZSHRC + STAND_INS,
+                       files=FILES))
+    for command in ("echo one", "echo two"):
+        box.live.run(command)
+    assert box.ask(TAB, "ls be") == ("ls beta.txt ", 12)
+    assert box.ask(TAB, "ls al") == ("ls alpha", 8)
+    assert box.session.listed() == (1, 0)
+    assert box.again(TAB) == ("ls alpha", 8)         # the list
+    assert box.session.listed() == (1, 1)
+    assert box.again(TAB) == ("ls alpha.txt", 12)    # and one after the other
+    assert box.again(TAB) == ("ls alphabet.txt", 15)
+    # The arrow keys the way a terminal in application mode sends them,
+    # which is the way the box hands them on while the line editor waits.
+    assert box.live.pump(lambda: box.session.term.app_cursor)
+    up, down = b"\x1bOA", b"\x1bOB"
+    assert box.ask(up, "dra") == ("echo two", 8)
+    assert box.again(up) == ("echo one", 8)
+    assert box.again(down) == ("echo two", 8)
+    assert box.again(down) == ("dra", 3)
+    assert box.look("echo t") == (
+        "echo two", [(0, 4, "fg=green"), (5, 6, "none")])
+    assert box.run("echo done").lines() == ["done"]
+    assert background(box.session) == []
+
+
+@pytest.mark.parametrize("options", [
+    "nounset", "errreturn", "ksharrays", "shwordsplit globsubst",
+    "warncreateglobal warnnestedvar",
+    "nounset errreturn ksharrays shwordsplit globsubst warncreateglobal "
+    "warnnestedvar"])
+def test_the_configuration_may_set_any_options(shell, options):
+    box = Asking(shell(
+        f"PS1='%% '\n{STAND_INS}"
+        "stubborn() { POSTDISPLAY=' and so forth' }\n"
+        "zle -N stubborn\n"
+        "bindkey '^[[Z' stubborn\n"
+        f"setopt {options}\n", files=FILES))
+    block = box.live.run("echo works; false")
+    assert block.lines() == ["works"] and block.exit_code == 1
+    assert block.command == "echo works; false"
+    assert box.session.hinting is True
+    assert box.look("echo w") == (
+        "echo works; false", [(0, 4, "fg=green"), (5, 6, "none")])
+    assert box.ask(TAB, "ls be") == ("ls beta.txt ", 12)
+    assert box.hints[-1] == (
+        "ls beta.txt ", "", [(0, 2, "fg=green"), (3, 12, "none")])
+    assert box.ask(b"\x1b[Z", "ls be") == ("ls be", 5)
+    assert box.live.input_text() == "% ls be"
+    assert box.ask(UP, "") == ("echo works; false", 17)
+    assert box.run("echo again").lines() == ["again"]
+    assert background(box.session) == []             # and no complaints

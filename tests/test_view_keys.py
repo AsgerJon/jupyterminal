@@ -260,6 +260,17 @@ def test_typing_drops_a_selection_in_the_line_being_edited(ui):
     assert not view.has_text_selection()
 
 
+def test_typing_lets_go_of_text_selected_in_the_output(ui):
+    h = ui()
+    one, ls, bad = three_blocks(h)
+    view = h.view
+    view._sel = ((ls.id, 1, 0, 0), (ls.id, 1, 0, 5))
+    assert view.selection_text() == "a.txt"
+    updates = count_updates(h)
+    assert press(h, Key.Key_X, NONE, "x") == [b"x"]
+    assert view._sel is None and len(updates) == 1
+
+
 def test_typing_keeps_a_selection_in_a_full_screen_program(ui):
     h = ui()
     full_screen(h, b"page text")
@@ -360,6 +371,37 @@ def test_block_shortcuts_work_only_while_a_block_is_selected(ui):
     assert h.view.selected == [ls.id]
 
 
+def test_escape_lets_go_of_selected_text_and_is_no_key_for_the_shell(ui):
+    h = ui()
+    one, ls, bad = three_blocks(h)
+    view = h.view
+    view._sel = ((ls.id, 1, 0, 0), (ls.id, 1, 0, 5))
+    assert press(h, Key.Key_Escape) == []
+    assert not view.has_text_selection() and view.hasFocus()
+    assert press(h, Key.Key_Escape) == [b"\x1b"]    # nothing is selected now
+    # In the line that is being edited as well.
+    h.session.feed(b"echo typed")
+    h.pump()
+    view._gsel = (h.session.input, (0, 2), (0, 6))
+    assert view.selection_text() == "echo"
+    assert press(h, Key.Key_Escape) == []
+    assert view._gsel is None
+    # The other keys of the blocks need a block: with text selected they
+    # are keys for the shell.
+    view._sel = ((ls.id, 1, 0, 0), (ls.id, 1, 0, 5))
+    assert press(h, Key.Key_Up) == [b"\x1b[A"]
+    assert view.selected == []
+
+
+def test_a_full_screen_program_gets_escape_whatever_is_selected(ui):
+    h = ui()
+    full_screen(h, b"page text")
+    view = h.view
+    view._gsel = (h.session.term.screen, (0, 0), (0, 4))
+    assert press(h, Key.Key_Escape) == [b"\x1b"]
+    assert view.selection_text() == "page"
+
+
 def test_a_shifted_symbol_matches_a_shortcut_that_does_not_name_shift(ui):
     h = ui()
     size = h.view.r.size
@@ -376,6 +418,24 @@ def test_the_first_matching_spelling_of_a_block_shortcut_wins(ui):
     h.view.select_block(ls)
     assert press(h, Key.Key_Exclam, SHIFT, "!") == []
     assert h.view.selected == [one.id]
+
+
+def test_in_a_full_screen_program_no_key_is_a_key_of_the_blocks(ui):
+    config = Config()
+    config.keys["blocks.previous"] = ["Ctrl+Shift+C"]    # the key of "copy"
+    h = ui(config=config)
+    one, ls, bad = three_blocks(h)
+    h.view.select_block(ls)
+    actions = record_actions(h)
+    assert press(h, Key.Key_C, CTRL | SHIFT) == []
+    assert actions == ["blocks.previous"]     # with a block selected
+    actions.clear()
+    h.session.feed(submit("sleep 1; vim") + b"\x1b[?1049h\x1b[2J\x1b[H")
+    h.view.select_block(ls)
+    h.pump()
+    assert h.session.fullscreen and h.view.selected == [ls.id]
+    assert press(h, Key.Key_C, CTRL | SHIFT) == []
+    assert actions == ["copy"]                # the program's screen is copied
 
 
 def test_a_full_screen_program_gets_every_key_but_copy_paste_and_zoom(ui):

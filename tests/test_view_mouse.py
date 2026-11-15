@@ -333,6 +333,54 @@ def test_a_click_selects_a_block_and_modifiers_extend_the_selection(
     assert view._sel is None and h.sent == []
 
 
+def test_a_second_click_on_the_selected_block_lets_go_of_it(ui, clock):
+    h = ui()
+    one, ls, bad = three_blocks(h)
+    view = h.view
+    click(h, h.point(ls, 1, 2))
+    assert view.selected == [ls.id]
+    clock.value += 1
+    updates = count_updates(h)
+    click(h, h.point(ls))                # anywhere on it
+    assert view.selected == [] and view._cursor_block is None
+    assert len(updates) == 1 and h.sent == []
+    # A click on another block moves the selection there.
+    clock.value += 1
+    click(h, h.point(ls))
+    click(h, h.point(bad))
+    assert view.selected == [bad.id]
+    # Of several selected blocks, a click keeps the one it is on.
+    click(h, h.point(one), mods=CTRL)
+    assert view.selected == [one.id, bad.id]
+    clock.value += 1
+    click(h, h.point(bad))
+    assert view.selected == [bad.id]
+
+
+def test_a_click_with_text_selected_only_lets_go_of_the_text(ui, clock):
+    h = ui()
+    one, ls, bad = three_blocks(h)
+    view = h.view
+    drag(h, h.point(ls, 0, 2), h.point(ls, 1, 3))
+    assert view.selection_text() == "txt  b.txt\nc.t"
+    clock.value += 1
+    updates = count_updates(h)
+    click(h, h.point(one, 0, 1))
+    assert view._sel is None and view.selected == []
+    assert len(updates) == 1
+    clock.value += 1
+    click(h, h.point(one, 0, 1))         # nothing is selected: this selects
+    assert view.selected == [one.id]
+    # With Ctrl or Shift a click is about blocks, text selected or not.
+    for mods in (CTRL, SHIFT):
+        clock.value += 1
+        drag(h, h.point(ls, 0, 2), h.point(ls, 1, 3))
+        assert view.selected == [] and view.has_text_selection()
+        clock.value += 1
+        click(h, h.point(bad), mods=mods)
+        assert view.selected == [bad.id] and view._sel is None, mods
+
+
 def test_clicks_count_up_to_a_word_and_then_a_line(ui):
     h = ui()
     block = h.run("cat f", "alpha beta-gamma delta\r\nsecond line\r\n")
@@ -365,9 +413,9 @@ def test_two_clicks_are_a_double_click_only_within_the_interval(ui, clock):
     clock.value = interval               # as late as it may be
     click(h, spot)
     assert view.selection_text() == "alpha"
-    clock.value = 3 * interval           # too late: the first click again
-    click(h, spot)
-    assert view._sel is None and view.selected == [block.id]
+    clock.value = 3 * interval           # too late: the first click again,
+    click(h, spot)                       # which lets go of the word
+    assert view._sel is None and view.selected == []
     clock.value = 3.5 * interval
     click(h, spot)
     assert view.selection_text() == "alpha"
@@ -386,12 +434,12 @@ def test_a_double_click_needs_both_clicks_on_the_same_spot(ui):
         click(h, first)
         click(h, second)
         assert view.selection_text() == line, (first, second)
-        click(h, second + QPoint(6, 0))  # the count starts again
-        assert view._sel is None and view.selected == [block.id]
+        click(h, second + QPoint(6, 0))  # the count starts again: one
+        assert view._sel is None and view.selected == []    # lets go,
         click(h, second + QPoint(6, 6))
-        assert view._sel is None and view.selected == [block.id]
-        click(h, second + QPoint(0, 6))
-        assert view._sel is None and view.selected == [block.id]
+        assert view._sel is None and view.selected == [block.id]    # one
+        click(h, second + QPoint(0, 6))  # selects, one lets go again
+        assert view._sel is None and view.selected == []
 
 
 def test_a_double_click_needs_the_same_text_under_both_clicks(ui):
@@ -400,8 +448,8 @@ def test_a_double_click_needs_the_same_text_under_both_clicks(ui):
     spot = h.point(block, 97, 0)
     click(h, spot)
     view._set_scroll(view.scroll - 2 * view.r.ch)    # between the clicks
-    click(h, spot)
-    assert view._sel is None and view.selected == [block.id]
+    click(h, spot)                       # a click of its own: no word, and
+    assert view._sel is None and view.selected == []    # the block let go
     click(h, spot)                       # now it is the same text again
     assert view.selection_text() == "95"
 
@@ -473,10 +521,14 @@ def test_a_double_click_on_an_empty_line_is_just_a_click(ui):
     block = h.run("printf", "top\r\n\r\nbottom\r\n")
     view = h.view
     spot = h.point(block, 1, 3)
+    published = []
+    view._publish_selection = lambda: published.append(view.selection_text())
     click(h, spot)
+    assert view.selected == [block.id]
     second_click(h, spot)
     assert view._sel is None
-    assert view.selected == [block.id]
+    assert view.selected == []           # as a second click lets go
+    assert published == []               # and nothing was selected between
 
 
 def test_dragging_after_a_double_click_grows_the_selection_by_the_word(ui):
@@ -563,6 +615,7 @@ def test_a_press_becomes_a_drag_after_four_pixels(ui, clock):
     start = h.point(ls, 0, 3)
     for step in (QPoint(3, 0), QPoint(0, -3), QPoint(-2, 1)):
         clock.value += 1
+        view.select_block(one)
         press(h, start)
         move(h, start + step)
         assert not view._press["dragging"], step
@@ -1022,7 +1075,11 @@ def test_a_press_anywhere_drops_a_selection_in_the_input_area(ui, clock):
     press(h, h.point(ls, 0, 1))          # on a block
     assert view._gsel is None
     release(h, h.point(ls, 0, 1))
-    assert view.selected == [ls.id] and not view.has_text_selection()
+    # The click let go of the text; it takes another one to select.
+    assert view.selected == [] and not view.has_text_selection()
+    clock.value += 1
+    click(h, h.point(ls, 0, 1))
+    assert view.selected == [ls.id]
 
 
 def test_dragging_in_a_full_screen_program_selects_its_cells(ui):

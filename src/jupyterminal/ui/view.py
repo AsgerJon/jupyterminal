@@ -70,6 +70,13 @@ _MODIFIER_KEYS = {
 #: Actions that stay available while a full-screen program has the view.
 _FULLSCREEN_ACTIONS = {"copy", "paste", "paste_selection", "zoom_in",
                        "zoom_out", "zoom_reset"}
+#: The actions whose shortcuts also work while the text box has the
+#: keyboard.  Scrolling to the very top or bottom is not among them:
+#: Shift+Home and Shift+End select text there, as in any text box.
+_CELL_ACTIONS = {"copy", "copy_command_and_output", "paste",
+                 "paste_selection", "select_newest_block", "clear_blocks",
+                 "find_in_block", "filter_output", "scroll_page_up",
+                 "scroll_page_down", "zoom_in", "zoom_out", "zoom_reset"}
 
 _PORTABLE = QKeySequence.SequenceFormat.PortableText
 
@@ -84,7 +91,7 @@ def _duration(seconds: float) -> str:
     return f"{hours}h {minutes:02d}m"
 
 
-def _short_path(path: str) -> str:
+def short_path(path: str) -> str:
     home = os.path.expanduser("~")
     if path == home:
         return "~"
@@ -131,7 +138,7 @@ class Frame:
     """The vertical arrangement of all blocks at one moment."""
 
     __slots__ = ("blocks", "ids", "tops", "heights", "content_h", "view_h",
-                 "input_h", "input_rows", "max_scroll")
+                 "input_h", "input_first", "input_rows", "max_scroll")
 
 
 class FindState:
@@ -152,6 +159,8 @@ class TerminalView(QWidget):
 
     titleChanged = Signal(str)
     sessionEnded = Signal()
+    #: The shell takes a command from the text box now, or stopped doing so.
+    inputReady = Signal(bool)
 
     def __init__(self, session, config, parent: QWidget | None = None
                  ) -> None:
@@ -199,6 +208,12 @@ class TerminalView(QWidget):
         self._seen_running = None
         self._flash = 0.0
         self._notifier = None
+        #: The text box commands are typed in, when the window has one;
+        #: without it they are typed in the shell's own line editor.
+        self.cell = None
+        self._input_ready = False
+        self._shell_asks = False
+        self._prompts = 0
 
         self._keys_global: dict[str, str] = {}
         self._keys_blocks: dict[str, str] = {}
@@ -241,6 +256,33 @@ class TerminalView(QWidget):
     # wiring
     # ------------------------------------------------------------------
 
+    def attach_cell(self, cell) -> None:
+        """Commands are typed in ``cell`` from now on."""
+        self.cell = cell
+        self._ui += 1
+        self.update()
+
+    def sync_input(self) -> None:
+        """Tell the text box when the shell starts or stops taking
+        commands, and show the shell's own line while it asks something
+        (which only time tells: the session has no event for it)."""
+        if self.cell is None:
+            return
+        session = self.session
+        asks = session.shell_asks
+        if asks != self._shell_asks:
+            self._shell_asks = asks
+            self._ui += 1
+            self.update()
+        if session.prompts != self._prompts:
+            # A new prompt: the shell may be somewhere else by now.
+            self._prompts = session.prompts
+            self.cell.show_place()
+        ready = session.input_ready
+        if ready != self._input_ready:
+            self._input_ready = ready
+            self.inputReady.emit(ready)
+
     def attach_io(self) -> None:
         """Start reading the shell's output."""
         fd = self.session.fileno()
@@ -267,6 +309,7 @@ class TerminalView(QWidget):
         backlog = pty.flush()
         self._io_timer.setInterval(4 if backlog else 120)
         self.session.tick()
+        self.sync_input()
         if pty.poll() is not None:
             # The shell is gone; take what it left and stop, even if a
             # background job still holds the terminal open.
@@ -294,6 +337,7 @@ class TerminalView(QWidget):
             self._find_timer.start()      # its output may have changed
         if self._gsel is not None:
             self._check_grid_selection()
+        self.sync_input()
         self.update()
 
     def _session_exited(self, status) -> None:
@@ -461,7 +505,7 @@ class TerminalView(QWidget):
             text = f"{block.store.dropped} earlier lines dropped"
             items.append(("chip", text, len(text) + 3))
         if block.is_command and self.cols >= 56 and block.cwd:
-            context = _short_path(block.cwd)
+            context = short_path(block.cwd)
             if block.branch:
                 context += f" ({block.branch})"
             limit = max(12, self.cols // 3)
@@ -633,11 +677,21 @@ class TerminalView(QWidget):
         geo.fbase = base
         geo.flive = True
 
-    def _input_rows(self) -> int:
+    def _input_span(self) -> tuple[int, int]:
+        """The rows of the shell's own input screen that show under the
+        blocks: the first of them, and how many."""
         session = self.session
         if not session.prompt_active or session.fullscreen:
-            return 0
-        return max(1, min(session.input.extent(), self.rows))
+            return 0, 0
+        if self.cell is not None and not self._shell_asks:
+            # The text box is the input.  Of the shell's own only what
+            # the line editor lists for the box shows: completions.
+            first, rows = session.listed()
+            return first, min(rows, self.rows)
+        return 0, max(1, min(session.input.extent(), self.rows))
+
+    def _input_rows(self) -> int:
+        return self._input_span()[1]
 
     def frame(self) -> Frame:
         """The current vertical layout (cached until something changes)."""
@@ -654,7 +708,8 @@ class TerminalView(QWidget):
         blocks = frame.blocks = list(session.blocks)
         frame.ids = [b.id for b in blocks]
         heights = frame.heights = [self._measure(b) for b in blocks]
-        rows = frame.input_rows = self._input_rows()
+        frame.input_first, rows = self._input_span()
+        frame.input_rows = rows
         frame.input_h = rows * self.r.ch + IN_TOP + IN_BOTTOM if rows else 0
         frame.input_h = min(frame.input_h, self.height())
         view_h = frame.view_h = max(0, self.height() - frame.input_h)
@@ -1166,16 +1221,18 @@ class TerminalView(QWidget):
             return []
         return [(cx, cx + 1, theme.cursor, theme.cursor_text)]
 
-    def _paint_screen(self, p, screen, x, y, rows, with_cursor) -> None:
-        """Draw a screen as a plain grid (input area, full-screen)."""
+    def _paint_screen(self, p, screen, x, y, rows, with_cursor,
+                      first: int = 0) -> None:
+        """Draw ``rows`` rows of a screen as a plain grid, from its row
+        ``first`` on (input area, full-screen)."""
         grid = screen.grid
         ch = self.r.ch
         gsel = self._gsel if (self._gsel and self._gsel[0] is screen) \
             else None
         if gsel:
             low, high = sorted(gsel[1:3])
-        for index in range(min(rows, len(grid))):
-            k = index
+        for index in range(first, min(first + rows, len(grid))):
+            k = index - first
             grid_row = grid[index]
             highlights = None
             if gsel and low[0] <= index <= high[0]:
@@ -1199,7 +1256,7 @@ class TerminalView(QWidget):
         session = self.session
         owns_cursor = session.cursor_screen() is session.input
         self._paint_screen(p, session.input, PAD_LEFT, top + IN_TOP,
-                           frame.input_rows, owns_cursor)
+                           frame.input_rows, owns_cursor, frame.input_first)
 
     # ------------------------------------------------------------------
     # hit testing
@@ -1556,6 +1613,8 @@ class TerminalView(QWidget):
         self.selected.sort()
         self._sel = None
         self._gsel = None
+        if self.cell is not None:
+            self.cell.drop_selection()      # one selection at a time
         self._ui += 1
         self.update()
 
@@ -1636,6 +1695,33 @@ class TerminalView(QWidget):
             QGuiApplication.clipboard().setText(text)
         return text
 
+    def copy_selection(self) -> bool:
+        """Copy what is selected in the output, if anything is, and let
+        go of the selection, so that the next Ctrl+C is an interrupt
+        again.  False when nothing was selected."""
+        if not (self.has_text_selection() or self.selected):
+            return False
+        self.copy()
+        self.drop_selection()
+        return True
+
+    def drop_selection(self) -> bool:
+        """Let go of everything that is selected in the output: text,
+        text on a screen, blocks.  False when nothing was selected."""
+        if not (self.has_text_selection() or self.selected):
+            return False
+        self._sel = None
+        self._gsel = None
+        self.clear_block_selection()
+        self.update()
+        return True
+
+    def _to_cell(self, text: str) -> None:
+        """Put ``text`` into the text box and give it the keyboard.  (The
+        box lets go of what is selected up here as its text changes.)"""
+        self.cell.insert(text)
+        self.cell.editor.setFocus()
+
     def copy_blocks(self, blocks, mode: str) -> str:
         text = copy_text(blocks, mode)
         QGuiApplication.clipboard().setText(text)
@@ -1651,6 +1737,10 @@ class TerminalView(QWidget):
         if not text:
             return
         body = text.replace("\r\n", "\n").replace("\r", "\n")
+        if self.cell is not None and self._input_ready:
+            # Into the text box, where nothing runs before Enter.
+            self._to_cell(body)
+            return
         if "\n" not in body.rstrip("\n"):
             # One line: leave the newline out, so that pasting never runs
             # anything by itself.
@@ -1663,6 +1753,32 @@ class TerminalView(QWidget):
         self.clear_block_selection()
         self.scroll_to_bottom()
         self.session.paste(body)
+
+    def cell_action(self, event) -> str | None:
+        """The action a key pressed in the text box stands for, if it is
+        one of those that work from there."""
+        for combo in self._combos(event):
+            action = self._keys_global.get(combo)
+            if action in _CELL_ACTIONS:
+                return action
+            if self._block_action(combo) == "blocks.focus_input":
+                return "blocks.focus_input"     # lets go of the selection
+        return None
+
+    def _block_action(self, combo: str) -> str | None:
+        """What a key means while something is selected in the output.
+        With blocks selected every key of the blocks counts; with text
+        selected only the one that lets go of it."""
+        action = self._keys_blocks.get(combo)
+        if self.selected:
+            return action
+        if action == "blocks.focus_input" and self.has_text_selection():
+            return action
+        return None
+
+    def do(self, action: str) -> None:
+        """Carry out an action by its name in the configuration."""
+        self._do(action)
 
     def _do(self, action: str) -> None:
         session = self.session
@@ -1761,12 +1877,18 @@ class TerminalView(QWidget):
         return block
 
     def focus_input(self) -> None:
-        """Give the keyboard back to the shell."""
-        self.clear_block_selection()
-        self.setFocus()
+        """Let go of what is selected and give the keyboard back to the
+        shell, or to the text box when that is where commands are typed."""
+        self.drop_selection()
+        if self.cell is not None and self._input_ready:
+            self.cell.editor.setFocus()
+        else:
+            self.setFocus()
 
     def set_font_size(self, size: float) -> None:
         self.r.set_font(self.r.family, size)
+        if self.cell is not None:
+            self.cell.apply_style()
         self._ui += 1
         for block in self.session.blocks:
             block.view = None
@@ -1793,6 +1915,10 @@ class TerminalView(QWidget):
             return
         self.clear_block_selection()
         self.scroll_to_bottom()
+        if self.cell is not None:
+            self.cell.set_text(block.command)
+            self.focus_input()
+            return
         self.session.set_command_buffer(block.command)
         self.setFocus()
 
@@ -2074,8 +2200,8 @@ class TerminalView(QWidget):
         fullscreen = self.session.fullscreen
         action = None
         for combo in self._combos(event):
-            if self.selected and not fullscreen:
-                action = self._keys_blocks.get(combo)
+            if not fullscreen:
+                action = self._block_action(combo)
             if action is None:
                 action = self._keys_global.get(combo)
             if action is not None:
@@ -2084,16 +2210,37 @@ class TerminalView(QWidget):
                                    or action in _FULLSCREEN_ACTIONS):
             self._do(action)
             return
+        if self.cell is not None and not fullscreen:
+            if "Ctrl+C" in self._combos(event) and self.copy_selection():
+                return          # with something selected, Ctrl+C copies
+            if self._input_ready:
+                # The shell waits for a command: it is typed in the box,
+                # and what was selected up here is let go of.
+                self.drop_selection()
+                self.cell.take_key(event)
+                return
+        self.type_key(event)
+
+    def key_bytes(self, event) -> bytes:
+        """What a key sends to the shell; nothing for a key that has no
+        code there."""
+        return self._encode(event) or b""
+
+    def type_key(self, event) -> None:
+        """Send a key to the shell, or to the program running in it."""
         data = self._encode(event)
         if data is not None:
             self._type(data)
 
     def _type(self, data: bytes) -> None:
         """Send what was typed to the shell or the program in it."""
-        # Typing gives the keyboard back to the shell.
-        self.clear_block_selection()
-        if self._gsel is not None and not self.session.fullscreen:
-            self._gsel = None            # the line it was on is changing
+        # Typing gives the keyboard back to the shell and lets go of what
+        # is selected.  Only a full-screen program keeps the selection on
+        # its screen: all the keys are typed to it.
+        if self.session.fullscreen:
+            self.clear_block_selection()
+        else:
+            self.drop_selection()
         if not self.follow:
             self.scroll_to_bottom()
         self.session.write(data)
@@ -2122,7 +2269,9 @@ class TerminalView(QWidget):
 
     def inputMethodEvent(self, event) -> None:
         text = event.commitString()
-        if text:
+        if text and self._input_ready:
+            self._to_cell(text)         # composed text goes where keys go
+        elif text:
             self._type(text.encode("utf-8", "replace"))
         event.accept()
 
@@ -2159,8 +2308,9 @@ class TerminalView(QWidget):
         if session.fullscreen:
             row, col = self._cell(x, y, 2)
             return session.term.screen, max(0, min(self.rows - 1, row)), col
-        row, col = self._cell(x, y, self.frame().view_h + IN_TOP)
-        return session.input, max(0, row), col
+        frame = self.frame()
+        row, col = self._cell(x, y, frame.view_h + IN_TOP)
+        return session.input, frame.input_first + max(0, row), col
 
     def _mouse_report(self, event, kind: str) -> bool:
         """Forward a mouse event to the program, if it asked for them."""
@@ -2227,6 +2377,8 @@ class TerminalView(QWidget):
             return
         if button != Qt.MouseButton.LeftButton:
             return
+        if self.cell is not None:
+            self.cell.drop_selection()      # one selection at a time
         now = time.monotonic()
         interval = QGuiApplication.styleHints().mouseDoubleClickInterval() \
             / 1000.0
@@ -2262,14 +2414,17 @@ class TerminalView(QWidget):
         pinned, inside = self._pinned_header_at(x, y)
         position = self._position_at(x, y) if pinned is None \
             else self._header_position(pinned, x, inside)
+        chord = event.modifiers() & (Qt.KeyboardModifier.ControlModifier
+                                     | Qt.KeyboardModifier.ShiftModifier)
+        # A plain click with text selected lets go of the text and does
+        # nothing else, as a click in any text does.
+        lets_go = not chord and self.has_text_selection()
         self._gsel = None
         self._press = {"zone": "blocks", "x": x, "y": y, "block": under,
                        "sticky": block, "pos": position, "dragging": False,
-                       "mods": event.modifiers()}
+                       "mods": event.modifiers(), "lets_go": lets_go}
         if position is None:
             return
-        chord = event.modifiers() & (Qt.KeyboardModifier.ControlModifier
-                                     | Qt.KeyboardModifier.ShiftModifier)
         if self._click_count >= 2 and not chord:
             unit = self._word_at(position) if self._click_count == 2 \
                 else self._line_at(position)
@@ -2385,8 +2540,10 @@ class TerminalView(QWidget):
             return
         block = press.get("block")
         self._sel = None
-        if block is None:
-            # Beside the blocks, in the input area or on the full screen.
+        if block is None or press["lets_go"]:
+            # Beside the blocks, in the input area or on the full screen,
+            # or a click that lets go of selected text: nothing is
+            # selected afterwards.
             self.clear_block_selection()
             self.update()
             return
@@ -2395,6 +2552,9 @@ class TerminalView(QWidget):
             self.select_block(block, "toggle")
         elif mods & Qt.KeyboardModifier.ShiftModifier:
             self.select_block(block, "range")
+        elif self.selected == [block.id]:
+            # A second click on the one selected block lets go of it.
+            self.clear_block_selection()
         else:
             self.select_block(block)
 

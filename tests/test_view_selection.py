@@ -769,6 +769,33 @@ def test_clearing_the_block_selection(ui):
     assert len(asked) == 1 and view._ui == laid_out + 1
 
 
+def test_letting_go_of_everything_that_is_selected(ui):
+    h = ui()
+    one, loop, bad, ls = scene(h)
+    h.session.feed(b"echo typed")
+    h.pump()
+    view = h.view
+    asked = repaints(view)
+    laid_out = view._ui
+    assert view.drop_selection() is False             # nothing is selected
+    assert asked == [] and view._ui == laid_out
+    view.select_block(loop)
+    view.select_block(ls, "toggle")
+    asked.clear()
+    assert view.drop_selection() is True
+    assert state(view) == ([], None, None)
+    assert len(asked) == 2                            # the blocks, the rest
+    view._sel = ((ls.id, 1, 0, 0), (ls.id, 1, 0, 5))
+    asked.clear()
+    assert view.drop_selection() is True
+    assert view._sel is None and len(asked) == 1
+    view._gsel = (h.session.input, (0, 2), (0, 6))
+    assert view.selection_text() == "echo"
+    assert view.drop_selection() is True
+    assert view._gsel is None and not view.has_text_selection()
+    assert view.drop_selection() is False
+
+
 # -- walking through blocks --------------------------------------------------
 
 def test_moving_the_selection_stops_at_the_first_and_last_block(ui):

@@ -27,6 +27,7 @@ def test_the_defaults():
     assert config.scrollback_lines == 2_000_000
     assert config.divert_background_output is True
     assert config.confirm_multiline_paste is True
+    assert config.input == "editor"
     assert config.word_characters == "-_./~:@%+#=?&"
     assert config.bell == "none"
     assert config.allow_clipboard_write is True
@@ -140,6 +141,7 @@ login = true
 scrollback_lines = 5000
 divert_background_output = false
 confirm_multiline_paste = false
+input = "shell"
 word_characters = "_"
 bell = "visual"
 allow_clipboard_write = false
@@ -152,10 +154,26 @@ allow_clipboard_write = false
     assert config.scrollback_lines == 5000
     assert config.divert_background_output is False
     assert config.confirm_multiline_paste is False
+    assert config.input == "shell"
     assert config.word_characters == "_"
     assert config.bell == "visual"
     assert config.allow_clipboard_write is False
     assert config.keys == DEFAULT_KEYS and config.colors == {}
+
+
+def test_commands_are_typed_in_a_text_box_or_in_the_shell(tmp_path):
+    path = write(tmp_path, '[terminal]\ninput = "editor"\n')
+    assert load(path).input == "editor" and load(path).warnings == []
+    path = write(tmp_path, '[terminal]\ninput = "vi"\n')
+    config = load(path)
+    assert config.input == "editor"                 # not one of the two
+    assert config.warnings == [
+        f"{path}: [terminal] input should be one of 'editor', 'shell', "
+        "not 'vi'"]
+    path = write(tmp_path, "[terminal]\ninput = 3\n")
+    config = load(path)
+    assert config.input == "editor"
+    assert config.warnings == [f"{path}: [terminal] input should be str"]
 
 
 def test_a_whole_number_is_fine_for_the_font_size(tmp_path):

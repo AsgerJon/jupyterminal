@@ -5,15 +5,21 @@
 
 # jupyterminal v0.0.0
 
-A terminal emulator whose session is a list of **blocks** instead of one
-continuous scroll. A block is one command plus everything it printed, kept
-as a unit you can select, copy and jump to. Copying a command's output
-takes one click and one shortcut — never a careful mouse drag.
+A terminal emulator in which typing and copying work the way they do
+everywhere else on the desktop.
 
-![jupyterminal](docs/screenshot.png)
+Commands are typed in a **text box**: a click places the cursor, Shift
+and the arrows select, typing replaces the selection, Ctrl+C, Ctrl+X and
+Ctrl+V are the clipboard and Ctrl+Z takes back. The session is a list of
+**blocks** instead of one continuous scroll. A block is one command plus
+everything it printed, kept as a unit you can select, copy and jump to.
+Copying a command's output takes one click and one shortcut — never a
+careful mouse drag.
 
-Built from `Block Terminal Cleanroom Functional Spec.pdf` alone. Linux,
-zsh, keyboard and mouse.
+![jupyterminal](https://raw.githubusercontent.com/AsgerJon/jupyterminal/main/docs/screenshot.png)
+
+Built from `Block Terminal Cleanroom Functional Spec.pdf` and its
+addendum, `docs/cua-input.md`, alone. Linux, zsh, keyboard and mouse.
 
 ## Install and run
 
@@ -23,7 +29,13 @@ jupyterminal                                              # or: python -m jupyte
 ```
 
 Needs Python ≥ 3.12, PySide6 and zsh. Options: `--shell PROGRAM`,
-`--login`, `-d DIR`, `--config FILE`, `--print-default-config`.
+`--login`, `-d DIR`, `--config FILE`, `--print-default-config`,
+`--install-desktop-entry`.
+
+`jupyterminal --install-desktop-entry` puts the program into the menus of
+your desktop, for you alone, started the way you started it just then.
+That entry is also what gives its windows their own icon in the task bar:
+on Wayland a desktop takes a window's icon from nowhere else.
 
 Python 3.11 is left out on purpose. PySide6 6.12.0 ends the interpreter
 there ("deallocating None") after a few thousand calls into Qt
@@ -32,15 +44,56 @@ longer do harm.
 
 ## Using it
 
-The window is a list of blocks with the shell's prompt pinned underneath.
-Type as in any terminal: line editing, completion and history are zsh's
-own. Pressing Enter creates a block; its output streams into it; when the
-command ends the block records the exit code and duration. A failed
-command gets a red bar and a tinted background.
+The window is a list of blocks with a text box pinned underneath. Type a
+command into the box as into any text field and press Ctrl+Enter: zsh
+runs it, with your aliases and functions, and a block appears; its output
+streams into it; when the command ends the block records the exit code
+and duration. A failed command gets a red bar and a tinted background.
+
+In the text box:
 
 | Do this | To get this |
 | --- | --- |
-| Click a block | Select it (Ctrl+click toggles, Shift+click takes a range) |
+| Click, drag, double-click, triple-click | Place the cursor, select text, a word, a line |
+| Shift with the arrows, `Home`, `End` (and Ctrl for words) | Select |
+| `Ctrl+A` | Select everything in the box |
+| `Ctrl+C` `Ctrl+X` `Ctrl+V` | Copy, cut, paste |
+| `Ctrl+Z` `Ctrl+Y` | Take back, redo |
+| `Ctrl+Enter` | Run the command |
+| `Enter` | Start a new line: several lines run as one command |
+| `Tab` | Complete, the way Tab does in your zsh |
+| `Up` / `Down` on the first / last line | Your shell's history, the way those keys walk it in your zsh |
+| `Right` or `End`, at the end of the text | Take what zsh-autosuggestions suggests |
+| `Ctrl+Right`, at the end of the text | Take one word of it |
+| `Ctrl+D` on an empty box | End the session |
+
+`Ctrl+C` copies wherever something is selected, in the box or in the
+output. With nothing selected it interrupts the running command, or
+empties the box when none is running. Only one thing is selected at a
+time: selecting in the box lets go of what is selected in the output, and
+the other way round. A command that is not complete (a
+loop without its end) comes back into the box instead of being run. While
+a command runs, the keys go to that program.
+
+Completing and the history stay zsh's own work: the box hands it the
+text, zsh does what the key is bound to there, and the text comes back. A
+list of possible completions shows above the box; a completion menu, or a
+question zsh asks first, gets the keyboard until it is answered.
+
+If your zsh loads **zsh-syntax-highlighting** or **zsh-autosuggestions**,
+the box shows what they would show on zsh's own line: the text in the
+plugin's colors, and behind the cursor, dimmed, the line it suggests.
+
+To type in zsh's own line editor instead, as in other terminals, set
+`input = "shell"` under `[terminal]` in the configuration.
+
+Everywhere in the window:
+
+| Do this | To get this |
+| --- | --- |
+| Click a block | Select it (Ctrl+click adds or removes one, Shift+click takes a range) |
+| Click it again, click in the text box, press `Esc`, or just type | Let go of what is selected, blocks or text |
+| Click, with text selected | Let go of the text, and nothing else |
 | `Ctrl+Shift+C` | Copy: the selected text if there is any, otherwise the output of the selected blocks |
 | `Ctrl+Alt+Shift+C` | Copy `$ command` followed by the output |
 | Drag, double-click, triple-click | Select text, a word, a line (also fills the primary selection) |
@@ -48,7 +101,6 @@ command gets a red bar and a tinted background.
 | `Ctrl+Up` | Select the newest block |
 | `Up` / `Down` | Move the selection (with Shift: extend it) |
 | `Ctrl+Shift+Up` / `Down` | Scroll to the top / bottom of the selected block |
-| `Esc`, or just type | Back to the prompt |
 | Right-click, or the ⋮ button | Block menu: copy output / command / both, find, filter, collapse, re-run, save to file |
 | `Ctrl+Shift+F` / `Ctrl+Shift+L` | Find in block / filter output |
 | `Ctrl+L`, `clear` | Scroll blocks out of view (they stay reachable) |

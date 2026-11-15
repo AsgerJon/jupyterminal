@@ -12,11 +12,13 @@ import time
 
 import pytest
 from PySide6 import QtWidgets
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import QSize, QTimer
+from PySide6.QtGui import QIcon
 
 import jupyterminal
 from jupyterminal import app as app_module
 from jupyterminal import config as config_module
+from jupyterminal import desktop as desktop_module
 from jupyterminal.session import CLOSED
 from jupyterminal.ui import MainWindow
 
@@ -70,6 +72,7 @@ class Stage:
             names=(self.app.applicationName(),
                    self.app.applicationDisplayName(),
                    self.app.desktopFileName()),
+            icon=self.app.windowIcon().pixmap(QSize(64, 64)).toImage(),
             size=(session.cols, session.rows),
             cap=session.max_lines,
             divert=session.divert,
@@ -118,20 +121,24 @@ def stage(qapp, tmp_path, monkeypatch):
     meanwhile, whatever started the tests."""
     handlers = [signal.getsignal(number) for number in SIGNALS]
     mask = signal.pthread_sigmask(signal.SIG_UNBLOCK, SIGNALS)
-    names = (qapp.applicationName(), qapp.applicationDisplayName(),
-             qapp.desktopFileName())
+    names = (qapp.applicationName(), qapp.desktopFileName())
     made = Stage(qapp, tmp_path)
     made.run_dir.mkdir(mode=0o700)
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(made.run_dir))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-config"))
+    # No desktop entry is installed unless a test puts one here.
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    monkeypatch.setenv("XDG_DATA_DIRS", str(tmp_path / "share"))
     monkeypatch.setenv("SHELL", "/nonexistent/login-shell")
     yield made
     for number, handler in zip(SIGNALS, handlers, strict=True):
         signal.signal(number, handler)
     signal.pthread_sigmask(signal.SIG_SETMASK, mask)
+    # The name shown to people is left alone: it follows the name of the
+    # application until it is set, and can never follow it again after.
     qapp.setApplicationName(names[0])
-    qapp.setApplicationDisplayName(names[1])
-    qapp.setDesktopFileName(names[2])
+    qapp.setDesktopFileName(names[1])
+    qapp.setWindowIcon(QIcon())
 
 
 # -- answers that need no window ---------------------------------------------
@@ -161,7 +168,8 @@ def test_the_help_names_every_option(capsys, monkeypatch):
     text = " ".join(capsys.readouterr().out.split())
     assert text.startswith("usage: jupyterminal [-h] [--version] "
                            "[--config FILE] [--shell PROGRAM] [--login] "
-                           "[-d DIR] [--print-default-config]")
+                           "[-d DIR] [--print-default-config] "
+                           "[--install-desktop-entry]")
     for phrase in (
             "A terminal emulator whose session is a list of command blocks.",
             "--config FILE configuration file (default: "
@@ -170,8 +178,29 @@ def test_the_help_names_every_option(capsys, monkeypatch):
             "--login start the shell as a login shell",
             "--working-directory DIR directory to start in",
             "--print-default-config print a configuration file with every "
-            "default and exit"):
+            "default and exit",
+            "--install-desktop-entry put the program into the menus of the "
+            "desktop, which also gives its windows their icon there, and "
+            "exit"):
         assert phrase in text
+
+
+def test_the_desktop_entry_is_installed_without_a_window(
+        capsys, monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    monkeypatch.setattr(sys, "executable", "/opt/py/bin/python")
+    monkeypatch.setattr(sys, "argv", ["/work/main.py"])
+    # Before any configuration is read, and without a display.
+    monkeypatch.setattr(config_module, "load", None)
+    monkeypatch.setitem(sys.modules, "PySide6.QtWidgets", None)
+    assert app_module.main(["--install-desktop-entry"]) == 0
+    path = str(tmp_path / "applications" / "jupyterminal.desktop")
+    captured = capsys.readouterr()
+    assert captured.out == (f"jupyterminal: wrote {path}; delete that file "
+                            "to take the program out of the menus again\n")
+    assert captured.err == ""
+    with open(path, encoding="utf-8") as handle:
+        assert "Exec=/opt/py/bin/python /work/main.py\n" in handle.read()
 
 
 def test_python_m_jupyterminal_is_the_same_program(capsys, monkeypatch):
@@ -190,7 +219,12 @@ def test_a_run_shows_the_window_and_ends_when_the_shell_does(stage, capsys):
     here = os.path.realpath(os.getcwd())
     assert stage.run("--shell", shell, act=stage.answer) == 0
     assert stage.report(shell) == [shell, "", here, shell, "30 100", ""]
-    assert stage.seen["names"] == ("jupyterminal",) * 3
+    # No desktop entry is installed: none is claimed.
+    assert stage.seen["names"] == ("jupyterminal", "jupyterminal", "")
+    # The windows carry the program's icon, for desktops that take it
+    # from them.
+    icon = QIcon(desktop_module.icon_path()).pixmap(QSize(64, 64))
+    assert stage.seen["icon"] == icon.toImage() and not icon.isNull()
     assert stage.seen["size"] == (100, 30)
     assert stage.seen["cap"] == 2_000_000 and stage.seen["divert"] is True
     assert stage.seen["reading"] is True
@@ -199,6 +233,18 @@ def test_a_run_shows_the_window_and_ends_when_the_shell_does(stage, capsys):
     assert stage.window.view.session.state == CLOSED
     stage.shell_is_gone()
     assert capsys.readouterr().err == ""             # zsh: nothing to say
+
+
+def test_the_window_belongs_to_the_desktop_entry_when_one_is_installed(
+        stage, tmp_path):
+    entries = tmp_path / "data" / "applications"
+    entries.mkdir(parents=True)
+    (entries / "jupyterminal.desktop").write_text(
+        "[Desktop Entry]\nType=Application\nName=jupyterminal\n"
+        "Exec=jupyterminal\n", encoding="utf-8")
+    shell = stage.program("zsh", REPORTING)
+    assert stage.run("--shell", shell, act=stage.answer) == 0
+    assert stage.seen["names"] == ("jupyterminal",) * 3
 
 
 def test_another_shell_runs_with_a_warning(stage, capsys):

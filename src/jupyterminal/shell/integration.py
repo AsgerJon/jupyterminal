@@ -26,6 +26,10 @@ _SHIMS = {
 
 #: Key sequence bound, in the shell, to "take the buffer file as input".
 SET_BUFFER_KEY = b"\x1b[7717;1~"
+#: ... to "do what the edit file asks for, and answer with the result".
+EDIT_KEY = b"\x1b[7717;2~"
+#: ... to "say what the plugins make of the text in the look file".
+LOOK_KEY = b"\x1b[7717;3~"
 
 
 def decode_field(text: str) -> str:
@@ -72,6 +76,8 @@ class ShellRuntime:
         except OSError:
             self.sync_path = ""
         self.buffer_path = os.path.join(self.path, "buffer")
+        self.edit_path = os.path.join(self.path, "edit")
+        self.look_path = os.path.join(self.path, "look")
         self._sync_fd = -1
 
     def environment(self, base: dict[str, str] | None = None
@@ -114,6 +120,35 @@ class ShellRuntime:
                      os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(text)
+
+    def write_edit(self, text: str, cursor: int, key: bytes,
+                   fallback: str, edited: bool) -> None:
+        """Leave a request for the shell's edit widget: do on ``text``,
+        with the cursor in front of its character number ``cursor``, what
+        ``key`` does in the shell, or what the widget ``fallback`` does
+        where that key does nothing of use.  ``edited`` says that the
+        text was edited since the widget last answered: this key does not
+        follow the one before it, then, even if the text is the same."""
+        self._request(self.edit_path, text, cursor, key, fallback.encode(),
+                      edited, b"")
+
+    def write_look(self, text: str, cursor: int, number: int) -> None:
+        """Leave request ``number`` for the shell's look widget: say what
+        the plugins make of ``text``."""
+        self._request(self.look_path, text, cursor, b"", b"", True,
+                      b"%d" % number)
+
+    @staticmethod
+    def _request(path: str, text: str, cursor: int, key: bytes,
+                 fallback: bytes, edited: bool, number: bytes) -> None:
+        # A full stop ends the text: reading a file, the shell would drop
+        # the newlines at its end.
+        data = b"\n".join((b"%d" % cursor, key, fallback,
+                           b"1" if edited else b"", number,
+                           text.encode("utf-8", "replace") + b"."))
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
 
     def cleanup(self) -> None:
         if self._sync_fd != -1:

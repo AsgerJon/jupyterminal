@@ -15,7 +15,7 @@ _DEFAULTS = {
     "dim": "#7d8594",
     "header_background": "#22252d",
     "header_foreground": "#eef0f4",
-    "divider": "#2b2f39",
+    "divider": "#525a6e",
     "selected_background": "#1c2738",
     "selected_header": "#25344f",
     "selected_bar": "#4d8eff",

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 import random
 import select
@@ -9,13 +10,14 @@ import select
 import pytest
 
 import jupyterminal.session.session as session_module
-from conftest import COLS, NONCE, mark, prompt, submit
+from conftest import COLS, NONCE, answer, escaped, mark, prompt, submit
 from jupyterminal.session import (BACKGROUND, BOTH, CLOSED, COMMAND, PROMPT,
                                   RUNNING, STARTUP, FilterSpec, Session,
                                   copy_text, filter_indices, find_matches,
                                   output_text)
 from jupyterminal.shell import ShellRuntime
-from jupyterminal.shell.integration import SET_BUFFER_KEY
+from jupyterminal.shell.integration import (EDIT_KEY, LOOK_KEY,
+                                            SET_BUFFER_KEY)
 
 
 def make(**kwargs) -> Session:
@@ -244,7 +246,18 @@ class FakeRuntime:
         self.requests: list[int] = []
         self.listening = listening
         self.buffers: list[str] = []
+        self.edits: list[tuple] = []
+        self.edited: list[bool] = []
+        self.looks: list[tuple] = []
         self.cleaned = 0
+
+    def write_edit(self, text: str, cursor: int, key: bytes,
+                   fallback: str, edited: bool) -> None:
+        self.edits.append((key, fallback, text, cursor))
+        self.edited.append(edited)
+
+    def write_look(self, text: str, cursor: int, number: int) -> None:
+        self.looks.append((text, cursor, number))
 
     def environment(self, base: dict | None = None) -> dict:
         return dict(base or {}, ZDOTDIR="/shims")
@@ -1421,6 +1434,554 @@ def test_no_command_can_be_handed_over_without_a_shell_directory():
     session.feed(prompt())
     assert session.set_command_buffer("echo again") is False
     assert session.pty.written == []
+
+
+# -- commands typed outside the shell -----------------------------------------
+
+def typed_elsewhere() -> tuple:
+    """A session at its first prompt whose commands come from a text box."""
+    runtime = FakeRuntime()
+    session = Session(COLS, 10, runtime=runtime)
+    session.pty = FakePty()
+    session.feed(prompt())
+    return session, runtime, session.pty.written
+
+
+def test_a_command_can_be_handed_over_while_the_line_editor_waits():
+    session = Session(COLS, 10, runtime=FakeRuntime())
+    assert session.input_ready is False                 # still starting up
+    assert session.prompts == 0
+    session.feed(prompt())
+    assert session.input_ready is True and session.prompts == 1
+    session.feed(b"\x1b[?1049h")                        # a full-screen picker
+    assert session.input_ready is False
+    session.feed(b"\x1b[?1049l")
+    assert session.input_ready is True
+    session.feed(submit("sleep 9"))
+    assert session.input_ready is False                 # a command runs
+    session.feed(prompt())
+    assert session.input_ready is True and session.prompts == 2
+
+
+def test_a_command_is_handed_over_and_submitted():
+    session, runtime, written = typed_elsewhere()
+    assert session.run_command("") is False
+    assert session.run_command(" \n ") is False         # nothing to run
+    assert runtime.buffers == [] and written == []
+    assert session.run_command("echo hi") is True
+    assert runtime.buffers == ["echo hi"]
+    assert written == [SET_BUFFER_KEY, b"\r"]
+    # The line editor is busy with it from this moment on.
+    assert session.line_ready is False and session.input_ready is False
+    assert session.run_command("echo again") is False   # one at a time
+    assert runtime.buffers == ["echo hi"]
+    session.feed(submit("echo hi") + b"hi\r\n")
+    assert session.input_ready is False
+    session.feed(prompt())
+    assert session.input_ready is True
+    assert session.run_command("echo again") is True
+    assert runtime.buffers == ["echo hi", "echo again"]
+
+
+def test_no_command_is_run_without_a_shell_directory():
+    session = make()
+    session.pty = FakePty()
+    session.feed(prompt())
+    assert session.input_ready is True
+    assert session.run_command("echo hi") is False
+    assert session.pty.written == []
+    assert session.input_ready is True                 # and nothing is pending
+
+
+def test_a_command_that_is_not_complete_is_called_off(clock):
+    session, runtime, written = typed_elsewhere()
+    told: list[str] = []
+    session.on_incomplete = told.append
+    assert session.run_command("for i in 1; do") is True
+    del written[:]
+    # The shell takes the line and comes back for the rest of it.
+    session.feed(mark("F", "for i in 1; do") + b"\r\nfor> " + mark("I"))
+    assert written == [b"\x03"] and told == ["for i in 1; do"]
+    assert session.line_ready is False and session.input_ready is False
+    clock.now += 60.0                   # however long the next prompt takes,
+    assert session.shell_asks is False  # nothing is waited for any more
+    session.feed(prompt(130))
+    assert session.input_ready is True
+    assert [b.command for b in session.blocks if b.is_command] == []
+    # With nobody to tell, it is called off all the same.
+    session.on_incomplete = None
+    assert session.run_command("while true; do") is True
+    del written[:]
+    session.feed(mark("F", "while true; do") + mark("I"))
+    assert written == [b"\x03"] and told == ["for i in 1; do"]
+    # Also where nobody was ever to be told.
+    session, runtime, written = typed_elsewhere()
+    assert session.run_command("while true; do") is True
+    session.feed(mark("F", "while true; do") + mark("I"))
+    assert written[-1] == b"\x03"
+
+
+def test_a_line_editor_that_comes_up_before_taking_the_line_is_left_alone():
+    session, runtime, written = typed_elsewhere()
+    assert session.run_command("ls") is True
+    session.feed(mark("I"))                           # it has not taken it yet
+    assert written == [SET_BUFFER_KEY, b"\r"]           # nothing is called off
+    assert session.line_ready is True
+    assert session.input_ready is False              # the command is under way
+    session.feed(submit("ls") + prompt())
+    assert session.input_ready is True
+
+
+def test_a_shell_that_does_not_start_a_command_is_asking_something(clock):
+    session, runtime, written = typed_elsewhere()
+    clock.now += 60.0
+    assert session.shell_asks is False                # nothing was handed over
+    assert session.run_command("sl") is True
+    assert session.shell_asks is False
+    clock.now += session_module.ASK_AFTER
+    assert session.shell_asks is False                  # not long enough yet
+    clock.now += 0.001
+    assert session.shell_asks is True
+    session.feed(mark("C", "/work", "sl"))              # it starts after all
+    assert session.shell_asks is False
+
+
+def test_a_shell_is_given_exactly_that_long_to_start_a_command(clock):
+    clock.now = 0.0                     # from zero the sums below are exact
+    session, runtime, written = typed_elsewhere()
+    assert session.run_command("sl") is True
+    clock.now = session_module.ASK_AFTER
+    assert session.shell_asks is False
+    clock.now = math.nextafter(session_module.ASK_AFTER, math.inf)
+    assert session.shell_asks is True
+
+
+def test_a_new_prompt_ends_the_waiting_for_a_command_to_start(clock):
+    session, runtime, written = typed_elsewhere()
+    assert session.run_command("echo )") is True
+    clock.now += 60.0
+    assert session.shell_asks is True
+    session.feed(mark("F", "echo )") + b"\r\nzsh: parse error\r\n"
+                 + prompt(1))
+    assert session.shell_asks is False and session.input_ready is True
+
+
+# -- asking the line editor ---------------------------------------------------
+
+#: What the line editor draws when it lists two files under its line and
+#: goes back up to it.
+LISTED = b"\r\nalphabet.txt  alpha.txt\x1b[A\r"
+
+
+def asking() -> tuple:
+    """A session whose line editor can be asked, and what it answers."""
+    session, runtime, written = typed_elsewhere()
+    answers: list[tuple] = []
+    session.on_edited = lambda text, cursor: answers.append((text, cursor))
+    return session, runtime, written, answers
+
+
+def test_the_line_editor_is_asked_and_answers():
+    session, runtime, written, answers = asking()
+    assert session.editing is False
+    assert session.ask_editor(b"\t", "expand-or-complete", "ls be", 5) is True
+    assert runtime.edits == [(b"\t", "expand-or-complete", "ls be", 5)]
+    assert written == [EDIT_KEY] and session.editing is True
+    assert session.input_ready is True               # nobody is kept waiting
+    assert session.ask_editor(b"\t", "", "x", 1) is False     # one at a time
+    assert session.run_command("ls") is False        # and nothing runs
+    assert len(runtime.edits) == 1 and runtime.buffers == []
+    session.feed(b"ta.txt " + answer("ls beta.txt "))
+    assert answers == [("ls beta.txt ", 12)] and session.editing is False
+    assert session.run_command("ls beta.txt ") is True
+
+
+def test_a_line_editor_that_cannot_answer_is_not_asked():
+    session = make()                                 # no shell directory
+    session.pty = FakePty()
+    session.feed(prompt())
+    assert session.input_ready is True
+    assert session.ask_editor(b"\t", "", "x", 1) is False
+    assert session.pty.written == [] and session.editing is False
+    session, runtime, written, answers = asking()
+    session.feed(submit("sleep 9"))                  # a command runs
+    assert session.ask_editor(b"\t", "", "x", 1) is False
+    assert runtime.edits == [] and written == []
+
+
+def test_an_answer_is_taken_as_it_comes():
+    session, runtime, written, answers = asking()
+    session.feed(answer("abc"))                  # nobody asked
+    assert answers == []
+    assert session.ask_editor(b"\t", "", "x", 1) is True
+    session.feed(mark("B") + mark("B", "2"))         # no text: no answer
+    half = ("2", "ab")                               # nor is half of one
+    session.feed(mark("B", *half) + mark("B", *half, ""))
+    assert answers == [] and session.editing is True
+    session.feed(answer(""))                     # no text left is one
+    assert answers == [("", 0)] and session.editing is False
+    for sent, expected in ((mark("B", "x", "abc", "", ""), ("abc", 3)),
+                           (answer("abc", 9), ("abc", 3)),
+                           (answer("a;b\nc", 1), ("a;b\nc", 1))):
+        assert session.ask_editor(b"\t", "", "x", 1) is True
+        session.feed(sent)
+        assert answers[-1] == expected and session.editing is False
+    session.on_edited = None                         # nobody listens
+    assert session.ask_editor(b"\t", "", "x", 1) is True
+    session.feed(answer("x"))
+    assert session.editing is False and len(answers) == 4
+
+
+def test_the_line_editor_may_answer_with_nobody_ever_having_listened():
+    session, runtime, written = typed_elsewhere()
+    for end in (answer("x"), submit("x") + prompt(), prompt()):
+        assert session.ask_editor(b"\t", "", "x", 1) is True
+        session.feed(end)
+        assert session.editing is False and session.input_ready is True
+
+
+def test_a_session_that_has_seen_no_prompt_lists_nothing():
+    session = make()
+    version = session.version
+    assert session.listed() == (0, 0) and session.editing is False
+    assert session.shell_asks is False
+    session.drop_list()
+    assert session.version == version
+
+
+def test_how_long_the_line_editor_gets_before_it_has_the_keyboard(clock):
+    session, runtime, written, answers = asking()
+    assert session.shell_asks is False
+    clock.now = 0.0                     # from zero the sums below are exact
+    assert session.ask_editor(b"\t", "", "ls al", 5) is True
+    clock.now = session_module.EDIT_ASK_AFTER
+    assert session.shell_asks is False and session.input_ready is True
+    clock.now = math.nextafter(session_module.EDIT_ASK_AFTER, math.inf)
+    assert session.shell_asks is True and session.input_ready is False
+    session.feed(answer("ls al"))                # it answers after all
+    assert session.shell_asks is False and session.input_ready is True
+    # With something on the screen it is a menu or a question much sooner.
+    clock.now = 0.0
+    assert session.ask_editor(b"\t", "", "ls al", 5) is True
+    session.feed(b"\r\nalphabet.txt  alpha.txt")
+    clock.now = session_module.EDIT_SHOWS_AFTER
+    assert session.shell_asks is False and session.input_ready is True
+    clock.now = math.nextafter(session_module.EDIT_SHOWS_AFTER, math.inf)
+    assert session.shell_asks is True and session.input_ready is False
+    assert session.editing is True
+    session.feed(answer("ls alpha.txt "))
+    assert session.shell_asks is False and session.input_ready is True
+    # What is drawn together with the answer makes nothing of the next
+    # request: that one starts with a clean slate.
+    clock.now = 0.0
+    assert session.ask_editor(b"\t", "", "ls al", 5) is True
+    clock.now = 1.0
+    assert session.shell_asks is False
+
+
+def test_what_the_line_editor_lists_and_how_it_is_let_go(clock):
+    session, runtime, written, answers = asking()
+    assert session.listed() == (0, 0)
+    session.ask_editor(b"\t", "", "ls al", 5)
+    session.feed(b"ls al" + LISTED + b"\x1b[7C" + answer("ls al"))
+    assert (session.input.cy, session.input.cx) == (0, 7)
+    assert session.listed() == (1, 1)                # the row under the line
+    changes: list[int] = []
+    session.on_change = lambda: changes.append(session.version)
+    version = session.version
+    session.drop_list()
+    assert session.listed() == (0, 0)
+    assert changes == [version + 1]
+    session.drop_list()                              # there is none
+    assert changes == [version + 1] and session.version == version + 1
+    # Asking again lets go of it ...
+    session.ask_editor(b"\t", "", "ls al", 5)
+    session.feed(answer("ls al"))
+    assert session.listed() == (1, 1)
+    session.ask_editor(b"\t", "", "ls al", 5)
+    assert session.listed() == (0, 0)
+    session.feed(answer("ls al"))
+    # ... a new prompt, and a command.  Nobody need be listening.
+    session.on_change = None
+    session.ask_editor(b"\t", "", "ls al", 5)
+    session.feed(LISTED + answer("ls al"))
+    assert session.listed()[1] == 1
+    session.feed(submit("ls al"))
+    assert session.listed() == (0, 0)
+    session.feed(prompt())
+    session.ask_editor(b"\t", "", "ls al", 5)
+    session.feed(LISTED + answer("ls al"))
+    assert session.listed()[1] == 1
+    session.drop_list()
+    assert session.listed() == (0, 0)
+    session.ask_editor(b"\t", "", "ls al", 5)
+    session.feed(LISTED + answer("ls al"))
+    session.feed(prompt())
+    assert session.listed() == (0, 0)
+
+
+@pytest.mark.parametrize("text, cursor, first", [
+    ("ls al", 5, 1),                     # the cursor at the end of one line
+    ("ls al\necho b", 5, 2),             # a second line under the cursor
+    ("ls al\n\n", 3, 3),                 # empty lines are lines
+    ("x" * 38, 0, 1),                    # a row filled to its last cell
+    ("x" * 39, 0, 2),                    # one cell more: another row
+    ("x" * 39, 39, 2),                   # with the cursor behind it
+    ("ab\n" + "y" * 40, 1, 2),           # a second line as wide as a row
+    ("ab\n" + "y" * 41, 1, 3),           # and one cell wider
+    ("ab\n" + "\u65e5" * 21, 1, 3),      # wide characters count double
+    ("ab\n", 3, 2),                      # the cursor on an empty last line
+])
+def test_the_list_begins_under_all_of_the_command(text, cursor, first):
+    session, runtime, written, answers = asking()
+    session.ask_editor(b"\t", "", text, cursor)
+    drawn = text.replace("\n", "\r\n").encode() + b"\r\nthe list"
+    session.feed(drawn + answer(text, cursor))
+    # The line editor puts its cursor back where it is in the text: this
+    # many cells in, of which the prompt takes two.
+    before = text[:cursor].split("\n")
+    cells = len(before[-1]) + (2 if len(before) == 1 else 0)
+    row = len(before) - 1 + cells // COLS
+    session.feed(f"\x1b[{row + 1};{cells % COLS + 1}H".encode())
+    assert session.listed() == (first, 1)
+
+
+def test_text_the_line_editor_has_not_drawn_yet_makes_no_list():
+    session, runtime, written, answers = asking()
+    session.ask_editor(b"\t", "", "a\nb\nc", 1)
+    session.feed(answer("a\nb\nc", 1))           # three lines to come
+    assert session.input.extent() == 1
+    assert session.listed() == (3, 0)
+
+
+def test_a_command_that_runs_in_place_of_an_answer_leaves_nothing():
+    session, runtime, written, answers = asking()
+    session.ask_editor(b"\t", "", "ls", 2)
+    session.feed(submit("ls"))                       # it was accepted
+    assert answers == [("", 0)] and session.editing is False
+    session.feed(prompt())
+    assert answers == [("", 0)]
+    session.feed(submit("ls") + prompt())            # nothing was asked:
+    assert answers == [("", 0)]                      # nobody is told
+    session.on_edited = None                         # nobody listens
+    session.ask_editor(b"\t", "", "ls", 2)
+    session.feed(submit("ls"))
+    assert session.editing is False
+
+
+def test_a_request_the_line_editor_gave_up_hands_the_text_back():
+    session, runtime, written, answers = asking()
+    session.ask_editor(b"\t", "", "ls al", 3)
+    session.feed(b"^C" + prompt(130))                # it was interrupted
+    assert answers == [("ls al", 3)]
+    assert session.editing is False and session.input_ready is True
+    session.feed(prompt())                           # only once
+    assert answers == [("ls al", 3)]
+    session.on_edited = None                         # nobody listens
+    session.ask_editor(b"\t", "", "x", 1)
+    session.feed(prompt())
+    assert session.editing is False
+
+
+def test_a_shell_that_has_gone_answers_nothing():
+    session, runtime, written, answers = asking()
+    session.ask_editor(b"\t", "", "ls", 2)
+    session.close()
+    assert session.editing is False and session.shell_asks is False
+    assert answers == []
+
+
+def test_the_line_editor_is_told_when_the_text_was_edited_meanwhile():
+    """A key that follows another with nothing in between goes on where
+    that one stopped: the next entry of a menu, the next line of a search
+    through the history.  Whether there was something in between, the
+    line editor cannot see from a text that is the same again."""
+    session, runtime, written, answers = asking()
+    session.ask_editor(b"\t", "", "", 0)             # nothing was typed yet
+    session.feed(answer("ls alpha"))
+    session.ask_editor(b"\t", "", "ls alpha", 8)     # the key again
+    session.feed(answer("ls alpha"))
+    session.look("ls alphax", 9)                     # typed, and deleted
+    session.look("ls alpha", 8)
+    session.ask_editor(b"\t", "", "ls alpha", 8)
+    assert runtime.edited == [False, False, True]
+    # Until it answers: a key that waits for the answer, and is typed
+    # then, counts as typed after it.
+    session.on_edited = lambda text, cursor: session.look(text + "x", 9)
+    session.feed(answer("ls alpha"))
+    session.ask_editor(b"\t", "", "ls alphax", 9)
+    session.on_edited = None
+    session.feed(answer("ls alphax"))
+    session.ask_editor(b"\t", "", "ls alphax", 9)
+    assert runtime.edited[3:] == [True, False]
+    # A look at a text is no answer about a key.
+    session.feed(prompt(plugins=True))
+    session.look("ls", 2)
+    session.feed(mark("V", "1", "", ""))
+    session.ask_editor(b"\t", "", "ls", 2)
+    assert runtime.edited[5:] == [True]
+
+
+# -- what the shell's plugins make of a text ----------------------------------
+
+def looking(plugins: bool = True) -> tuple:
+    """A session whose shell has plugins with something to say about a
+    command line (or has none), and what is heard from them."""
+    runtime = FakeRuntime()
+    session = Session(COLS, 10, runtime=runtime)
+    session.pty = FakePty()
+    session.feed(prompt(plugins=plugins))
+    hints: list[tuple] = []
+    session.on_hints = lambda *said: hints.append(said)
+    return session, runtime, session.pty.written, hints
+
+
+def view(number: int, go: str = "", colors: str = "") -> bytes:
+    """The shell's answer to a look."""
+    return mark("V", str(number), escaped(go), escaped(colors))
+
+
+def test_the_plugins_of_the_shell_are_asked_about_a_text():
+    session, runtime, written, hints = looking()
+    assert session.hinting is True
+    session.look("git st", 6)
+    assert runtime.looks == [("git st", 6, 1)]
+    assert written == [LOOK_KEY] and hints == []
+    session.feed(view(1, "git status", "0 3 fg=green\n4 6 none"))
+    assert hints == [("git st", "git status",
+                      [(0, 3, "fg=green"), (4, 6, "none")])]
+    session.look("git st", 4)            # every request has its number
+    assert runtime.looks[-1] == ("git st", 4, 2)
+    session.feed(view(2))
+    assert hints[-1] == ("git st", "", [])
+    assert session.editing is False and session.input_ready is True
+
+
+def test_a_text_edited_before_the_first_prompt_waits_for_it():
+    runtime = FakeRuntime()
+    session = Session(COLS, 10, runtime=runtime)
+    session.pty = FakePty()
+    session.look("ls", 2)                # nobody to ask yet
+    assert runtime.looks == [] and session.pty.written == []
+    session.feed(prompt(plugins=True))
+    assert runtime.looks == [("ls", 2, 1)]
+
+
+def test_a_prompt_may_say_more_than_is_understood_here():
+    session, runtime, written, hints = looking(plugins=False)
+    session.feed(mark("E", "0") + mark("P", "0", "on", "/work", "40", "1",
+                                       "and", "more")
+                 + mark("A") + b"% " + mark("I"))
+    assert session.hinting is True
+
+
+def test_a_shell_without_such_plugins_is_not_asked():
+    session, runtime, written, hints = looking(plugins=False)
+    assert session.hinting is False
+    session.look("git st", 6)
+    assert runtime.looks == [] and written == [] and hints == []
+    # Once it has some, the text that waited is looked at.
+    session.feed(prompt(plugins=True))
+    assert session.hinting is True
+    assert runtime.looks == [("git st", 6, 1)]
+    # A prompt that says nothing about plugins takes back what an earlier
+    # one said.
+    session.feed(mark("E", "0") + mark("A") + b"% " + mark("I"))
+    assert session.input_ready is True and session.hinting is False
+    session.look("ls", 2)
+    assert len(runtime.looks) == 1
+    # Without a shell directory there is nobody to ask.
+    session = make()
+    session.pty = FakePty()
+    session.feed(prompt(plugins=True))
+    assert session.hinting is False
+    session.look("x", 1)
+    assert session.pty.written == []
+
+
+def test_of_texts_that_follow_quickly_only_the_last_is_looked_at():
+    session, runtime, written, hints = looking()
+    session.look("g", 1)
+    session.look("gi", 2)                # the first one is still out
+    session.look("git", 3)
+    assert runtime.looks == [("g", 1, 1)]
+    session.feed(view(1, "git status"))  # about a text that is past
+    assert hints == []
+    assert runtime.looks[1:] == [("git", 3, 2)]
+    assert written == [LOOK_KEY, LOOK_KEY]
+    session.feed(view(2, "git status", "0 3 fg=green"))
+    assert hints == [("git", "git status", [(0, 3, "fg=green")])]
+    assert len(runtime.looks) == 2
+
+
+def test_only_the_answer_to_the_look_that_is_out_counts():
+    session, runtime, written, hints = looking()
+    session.feed(view(1, "nobody asked"))
+    session.look("ls", 2)
+    for other in (view(7, "another"), mark("V"), mark("V", "1"),
+                  mark("V", "1", "half")):
+        session.feed(other)
+        assert hints == []
+    session.look("ls", 2)                # still out: this one waits
+    assert len(runtime.looks) == 1
+    session.feed(mark("V", "1", "ls -la", "broken\n0 2 fg=green\n3 x b\n"
+                                "4 5\n6 9 fg=red,bold"))
+    assert hints == []                   # a newer one was wanted
+    session.feed(mark("V", "2", "ls -la",
+                      escaped("broken\n0 2 fg=green\n3 x b\n4 5\n"
+                              "6 9 fg=red,bold")))
+    assert hints == [("ls", "ls -la",
+                      [(0, 2, "fg=green"), (6, 9, "fg=red,bold")])]
+
+
+def test_no_text_needs_no_asking():
+    session, runtime, written, hints = looking()
+    session.look("", 0)
+    assert hints == [("", "", [])] and runtime.looks == []
+    session.on_hints = None              # nobody listens
+    session.look("", 0)
+    session.look("ls", 2)
+    session.feed(view(1, "ls -la"))
+    assert runtime.looks == [("ls", 2, 1)] and len(hints) == 1
+
+
+def test_a_look_waits_until_the_line_editor_is_free():
+    session, runtime, written, hints = looking()
+    session.ask_editor(b"\t", "", "ls", 2)
+    session.look("ls", 2)                # it is at work on something else
+    assert runtime.looks == []
+    # Its answer says what the plugins make of the text it hands back,
+    # and nothing waits any more.
+    session.feed(answer("ls ", go="ls -la", colors="0 2 fg=green"))
+    assert hints == [("ls ", "ls -la", [(0, 2, "fg=green")])]
+    session.feed(mark("I"))
+    assert runtime.looks == []
+    session.look("ls ", 3)               # asked for again, it is sent
+    assert runtime.looks == [("ls ", 3, 1)]
+    session.feed(view(1))
+    # An answer may have nothing to say about plugins.
+    session.ask_editor(b"\t", "", "ls ", 3)
+    session.feed(answer("ls"))
+    assert hints[-1] == ("ls", "", [])
+    # While a command runs nothing is looked at; when the shell is back
+    # for the next one, what waited is.
+    session.feed(submit("sleep 1"))
+    session.look("next", 4)
+    assert len(runtime.looks) == 1
+    session.feed(prompt(plugins=True))
+    assert runtime.looks[1:] == [("next", 4, 2)]
+
+
+def test_a_look_that_got_no_answer_is_forgotten_with_its_prompt():
+    session, runtime, written, hints = looking()
+    session.look("x", 1)
+    session.feed(prompt(130, plugins=True))          # the line was given up
+    session.feed(view(1, "too late"))
+    assert hints == []
+    session.look("y", 1)
+    assert runtime.looks[-1] == ("y", 1, 2)
+    session.feed(view(2, "yes"))
+    assert hints == [("y", "yes", [])]
 
 
 # -- resizing ----------------------------------------------------------------

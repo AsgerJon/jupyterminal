@@ -7,7 +7,10 @@
 # contains such a sequence (a file printed with cat, say) is ignored.
 #
 #   E;status         a command (or an empty prompt cycle) has ended
-#   P;status;notify;cwd;keytimeout   the prompt cycle begins
+#   P;status;notify;cwd;keytimeout;plugins
+#                    the prompt cycle begins.  plugins is 1 if the
+#                    configuration has plugins that have something to say
+#                    about a command line (see "look" below)
 #   A                the prompt is being drawn from its first character
 #   I                the line editor is ready for input
 #   F;buffer         the line editor is handing over this text
@@ -15,6 +18,13 @@
 #                    something else print
 #   C;cwd;command    this command is about to run
 #   S;seq;count      reply to a sync request: the line editor is idle
+#   B;cursor;buffer;suggestion;colors
+#                    reply to a request of the text box: the line editor's
+#                    text, and where its cursor is, after doing what a key
+#                    does in this shell; and what the plugins make of it
+#   V;number;suggestion;colors
+#                    reply to a request to look at a text: what the
+#                    plugins make of it
 
 [[ -o interactive ]] || return 0
 (( ${+JUPYTERMINAL_NONCE} )) || return 0
@@ -66,27 +76,42 @@ _jt_precmd() {
   local st=$?
   (( ${_jt_handoff:-0} )) && _jt_handoff_undo
   _jt_esc "$PWD"
-  _jt_mark "P;$st;${options[notify]};$REPLY;${KEYTIMEOUT:-40}"
+  _jt_mark "P;$st;${options[notify]};$REPLY;${KEYTIMEOUT:-40};$((
+    ${+functions[_zsh_highlight]} ||
+    ${+functions[_zsh_autosuggest_fetch_suggestion]} ))"
 }
 
-# Runs last: by now every theme has set the prompt it wants.
-_jt_precmd_last() {
-  if [[ ${precmd_functions[1]} != _jt_precmd ||
-        ${precmd_functions[-1]} != _jt_precmd_last ]]; then
+# _jt_precmd first and _jt_precmd_last last among the prompt hooks,
+# _jt_preexec last among those that run before a command.  Under zsh's own
+# options: with KSH_ARRAYS the arrays would be read differently.
+_jt_order_hooks() {
+  emulate -L zsh
+  typeset -ga precmd_functions preexec_functions
+  if [[ ${precmd_functions[1]-} != _jt_precmd ||
+        ${precmd_functions[-1]-} != _jt_precmd_last ]]; then
     precmd_functions=(_jt_precmd
                       ${precmd_functions:#_jt_precmd(|_last)}
                       _jt_precmd_last)
   fi
-  if [[ ${preexec_functions[-1]} != _jt_preexec ]]; then
+  if [[ ${preexec_functions[-1]-} != _jt_preexec ]]; then
     preexec_functions=(${preexec_functions:#_jt_preexec} _jt_preexec)
   fi
+}
+
+# Runs last: by now every theme has set the prompt it wants.
+_jt_precmd_last() {
+  _jt_order_hooks
   # The end-of-line mark is written by zsh before anything else once a
   # command returns: the earliest, most exact end-of-command signal.
   setopt promptsp promptcr
-  PROMPT_EOL_MARK=$_jt_eol_mark
-  [[ $POSTEDIT == *"$_jt_t_mark"* ]] || POSTEDIT+=$_jt_t_mark
-  if [[ -o promptpercent && $PS1 != *"$_jt_a_mark"* ]]; then
-    PS1=${_jt_a_mark}${PS1}
+  # Whatever the configuration sets: with NO_UNSET a parameter nobody has
+  # set must not be read bare, and with WARN_NESTED_VAR a global is set
+  # by saying that it is one.
+  typeset -g PROMPT_EOL_MARK=$_jt_eol_mark
+  [[ ${POSTEDIT-} == *"$_jt_t_mark"* ]] ||
+    typeset -g POSTEDIT=${POSTEDIT-}$_jt_t_mark
+  if [[ -o promptpercent && ${PS1-} != *"$_jt_a_mark"* ]]; then
+    typeset -g PS1=${_jt_a_mark}${PS1-}
   fi
   _jt_zle_hooks
 }
@@ -181,6 +206,9 @@ _jt_line_finish() {
 }
 
 _jt_zle_hooks() {
+  # Under zsh's own options: add-zle-hook-widget gives up where the
+  # configuration has set ERR_RETURN.
+  emulate -L zsh
   (( ${+functions[add-zle-hook-widget]} )) || return 0
   if (( ${_jt_zle_ok:-0} )) &&
      [[ ${widgets[zle-line-init]} == user:azhw:zle-line-init &&
@@ -228,21 +256,178 @@ _jt_set_buffer() {
   CURSOR=$#BUFFER
 }
 builtin zle -N _jt_set_buffer
+
+# The text box asks the line editor.  Completing a word and walking
+# through the history are the shell's to do, and so is what its plugins
+# know: how zsh-syntax-highlighting colors a command line, how
+# zsh-autosuggestions would go on with it.  The text box leaves a request
+# in a file and sends a private key:
+#
+#   edit   its text, the place of its cursor, a key (Tab, Up, Down) and
+#          whether the text was edited since the last such request.  What
+#          that key runs in this shell is run on the text; text, cursor
+#          and what the plugins say go back in the mark B.
+#   look   its text.  What the plugins say goes back in the mark V, with
+#          the number of the request.
+#
+# _jt_request reads such a file: it sets _jt_text, _jt_cursor, _jt_edited,
+# _jt_seq and _jt_widget of its caller.  A key that runs nothing useful
+# here falls back on the widget the request names.
+_jt_request() {
+  emulate -L zsh
+  local file=$_jt_dir/$1 key fallback bound=
+  [[ -r $file ]] || return 1
+  {
+    IFS= read -r _jt_cursor && IFS= read -r key && IFS= read -r fallback &&
+      IFS= read -r _jt_edited && IFS= read -r _jt_seq || return 1
+    IFS= read -r -d '' _jt_text
+  } < $file
+  [[ $_jt_cursor == <-> ]] || return 1
+  # The text ends in a full stop, which keeps its last newlines.
+  _jt_text=${_jt_text%.}
+  if [[ -n $key ]]; then
+    bound=$(builtin bindkey -M main -- $key 2>/dev/null)
+    bound=${bound##* }
+    [[ $bound == (undefined-key|self-insert|self-insert-unmeta) ]] && bound=
+  fi
+  _jt_widget=${bound:-$fallback}
+}
+
+# The text of a request becomes the text of the line editor.  This and
+# the widgets below run under the options of the configuration, as the
+# widgets and plugins they call expect; nothing in them may trip over one.
+_jt_take() {
+  # Text the line editor has not seen belongs on the newest line of the
+  # history, not on one that was fetched from it.  (The dot names zsh's
+  # own widget: what a plugin has wrapped around it is not meant here.)
+  [[ $BUFFER == "$_jt_text" ]] || builtin zle .end-of-history || :
+  # Setting text and cursor, even to what they are, ends what the line
+  # editor was in the middle of, a walk through a menu of completions
+  # say: as typing does.
+  BUFFER=$_jt_text
+  CURSOR=$_jt_cursor
+}
+
+# REPLY = what the plugins of the configuration make of the line editor's
+# text, as two fields of a mark: the line zsh-autosuggestions would go on
+# to, and the colors zsh-syntax-highlighting gives the text.  Each is
+# empty where its plugin is not there, or has been told to keep quiet.
+_jt_describe() {
+  local _jt_spans= _jt_go=
+  if [[ -n $BUFFER ]] && (( ! ${+_ZSH_AUTOSUGGEST_DISABLED} )) &&
+     (( ${+functions[_zsh_autosuggest_fetch_suggestion]} )) &&
+     { [[ -z ${ZSH_AUTOSUGGEST_BUFFER_MAX_SIZE-} ]] ||
+       (( $#BUFFER <= ZSH_AUTOSUGGEST_BUFFER_MAX_SIZE )) }; then
+    _zsh_autosuggest_fetch_suggestion "$BUFFER" || :
+    _jt_go=${suggestion-}
+  fi
+  if (( ${+functions[_zsh_highlight]} )); then
+    _zsh_highlight || :
+    _jt_spans_of
+  fi
+  _jt_esc "$_jt_go"
+  _jt_go=$REPLY
+  _jt_esc "$_jt_spans"
+  # (Said to be a global: WARN_NESTED_VAR complains about one that is
+  # set from inside a function without a word.)
+  typeset -g REPLY="$_jt_go;$REPLY"
+}
+
+# _jt_spans of the caller = the colors of the line editor's text, a
+# "start end style" to the line.
+_jt_spans_of() {
+  emulate -L zsh
+  local span
+  local -a spans
+  for span in "${region_highlight[@]}"; do
+    # (Those that begin with a P are about what stands before the text.)
+    [[ $span == <->' '<->' '* ]] && spans+=("${span% memo=*}")
+  done
+  _jt_spans=${(F)spans}
+}
+
+# Runs a widget for the text box.  zsh-autosuggestions looks for a
+# suggestion after every widget and draws it behind the line editor's
+# text; here the text box shows what it suggests (see _jt_describe), so
+# for the time of the widget that plugin is told that it is switched off.
+_jt_run() {
+  local _ZSH_AUTOSUGGEST_DISABLED=
+  # With -w the widget finds its own name in WIDGET, as it does when a
+  # key runs it: several widgets may share one function and tell by the
+  # name what to do.
+  builtin zle "$1" -w || :
+}
+
+# Makes $1 the widget that was used last (LASTWIDGET) for the one that
+# runs next.  A widget that goes on where its last use stopped, such as a
+# search through the history, knows by that name that nothing came in
+# between.  zsh gives the name only to a widget that has just run; so the
+# name runs nothing for a moment and gets its widget back.
+_jt_nop() { : }
+_jt_was() {
+  emulate -L zsh
+  [[ -n $1 && $1 != .* && -n ${widgets[$1]-} ]] || return 0
+  builtin zle -A -- $1 _jt_kept 2>/dev/null || return 0
+  {
+    builtin zle -N -- $1 _jt_nop && builtin zle -- $1
+  } always {
+    builtin zle -A -- _jt_kept $1
+    builtin zle -D -- _jt_kept
+  }
+}
+
+_jt_edit() {
+  local _jt_text _jt_cursor _jt_edited _jt_seq _jt_widget _jt_said
+  _jt_request edit || return 0
+  if [[ -z $_jt_edited && $BUFFER == "$_jt_text" &&
+        $CURSOR == "$_jt_cursor" ]]; then
+    # Nothing has happened to the text since the line editor last had it.
+    # It is left alone, so that the next Tab goes on where the last one
+    # stopped; and if that was a request too, this key follows the key of
+    # that one as if nothing of the text box had been in between.
+    [[ $LASTWIDGET != _jt_edit ]] || _jt_was "${_jt_last-}"
+  else
+    _jt_take
+  fi
+  [[ -z $_jt_widget ]] || _jt_run "$_jt_widget"
+  typeset -g _jt_last=$_jt_widget
+  # Whatever a plugin shows behind the text is for a display the text box
+  # has taken the place of; under the text there is to be nothing but
+  # what the widget lists.
+  [[ -z ${POSTDISPLAY-} ]] || POSTDISPLAY=
+  # The display comes first.  If the widget asks something ("do you wish
+  # to see all 150 possibilities?") or opens a menu, it does so before
+  # the answer below, and the terminal gives it the keyboard meanwhile.
+  builtin zle -R || :
+  _jt_describe
+  _jt_said=$REPLY
+  _jt_esc "$BUFFER"
+  _jt_mark "B;$CURSOR;$REPLY;$_jt_said"
+}
+builtin zle -N _jt_edit
+
+_jt_look() {
+  local _jt_text _jt_cursor _jt_edited _jt_seq _jt_widget
+  _jt_request look || return 0
+  _jt_take
+  _jt_describe
+  _jt_mark "V;$_jt_seq;$REPLY"
+}
+builtin zle -N _jt_look
+
 () {
   local keymap
   for keymap in emacs viins vicmd; do
     builtin bindkey -M $keymap '\e[7717;1~' _jt_set_buffer 2>/dev/null
+    builtin bindkey -M $keymap '\e[7717;2~' _jt_edit 2>/dev/null
+    builtin bindkey -M $keymap '\e[7717;3~' _jt_look 2>/dev/null
   done
 }
 
 # -- installation ------------------------------------------------------------
 
-typeset -ga precmd_functions preexec_functions
-precmd_functions=(_jt_precmd
-                  ${precmd_functions:#_jt_precmd(|_last)}
-                  _jt_precmd_last)
-preexec_functions=(${preexec_functions:#_jt_preexec} _jt_preexec)
+_jt_order_hooks
 setopt promptsp promptcr
 PROMPT_EOL_MARK=$_jt_eol_mark
-[[ $POSTEDIT == *"$_jt_t_mark"* ]] || POSTEDIT+=$_jt_t_mark
+[[ ${POSTEDIT-} == *"$_jt_t_mark"* ]] || POSTEDIT=${POSTEDIT-}$_jt_t_mark
 _jt_zle_hooks

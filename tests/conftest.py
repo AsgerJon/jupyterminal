@@ -4,6 +4,7 @@ under the session model, and the view and the window off screen."""
 from __future__ import annotations
 
 import os
+import re
 import select
 import shutil
 import time
@@ -13,6 +14,10 @@ import pytest
 #  Always off screen: a run of the tests must never open windows on the
 #  desktop of whoever started it.
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
+#  Always in the same language: the order zsh lists file names in, and
+#  what the programs the tests run have to say, must not depend on the
+#  machine.  This is the one every Linux has.
+os.environ["LC_ALL"] = "C.UTF-8"
 
 from PySide6.QtCore import QPoint, Qt  # noqa: E402
 from PySide6.QtGui import QGuiApplication  # noqa: E402
@@ -54,12 +59,32 @@ def mark(kind: str, *fields: str) -> bytes:
     return f"\x1b]7717;{NONCE};{body}\x07".encode()
 
 
-def prompt(status: int = 0, text: str = "% ") -> bytes:
-    """What zsh sends between the end of a command and a ready prompt."""
+def escaped(text: str) -> str:
+    """A field of a mark the way the shell writes it: control characters,
+    ';' and '%' as %XX."""
+    return re.sub("[\x00-\x1f\x7f;%]",
+                  lambda found: "%%%02X" % ord(found.group()), text)
+
+
+def prompt(status: int = 0, text: str = "% ", plugins: bool = False) -> bytes:
+    """What zsh sends between the end of a command and a ready prompt;
+    with ``plugins``, from a configuration whose plugins have something
+    to say about a command line."""
+    said = ("40", "1") if plugins else ()
     return (mark("E", str(status)) + b" " * COLS + b"\r\r"
-            + mark("P", str(status), "on", "/work")
+            + mark("P", str(status), "on", "/work", *said)
             + b"\r\x1b[0m\x1b[27m\x1b[24m\x1b[J" + mark("A") + text.encode()
             + b"\x1b[K" + mark("I") + b"\x1b[?2004h")
+
+
+def answer(text: str, cursor: int | None = None, go: str = "",
+           colors: str = "") -> bytes:
+    """What zsh sends when its line editor has done what the text box
+    asked of it: where its cursor is (behind the text, unless said) and
+    its text, then the line its plugins would go on to from there and the
+    colors they give the text."""
+    at = len(text) if cursor is None else cursor
+    return mark("B", str(at), escaped(text), escaped(go), escaped(colors))
 
 
 def submit(command: str, typed: str | None = None) -> bytes:
@@ -361,7 +386,9 @@ class LiveWindow:
         env = {k: v for k, v in os.environ.items()
                if k not in ("ZDOTDIR", "PS1", "PROMPT", "RPROMPT")}
         env["HOME"] = self.home
-        self.config = config or config_module.Config()
+        # Typed into the shell's own line editor unless a test says
+        # otherwise: that is what the keys of these tests are for.
+        self.config = config or config_module.Config(input="shell")
         self.session = Session(cols, rows)
         self.window = MainWindow(self.session, self.config)
         self.view = self.window.view

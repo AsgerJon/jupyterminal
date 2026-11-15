@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- The window in small: what a command printed, and under it the text
+       box, with some of its text selected and the cursor behind it. -->
+  <rect x="2" y="2" width="60" height="60" rx="13" fill="#4d8eff"/>
+  <rect x="9" y="10" width="46" height="26" rx="5" fill="#1a1c22"/>
+  <rect x="14" y="16" width="16" height="4" rx="2" fill="#eef0f4"/>
+  <rect x="14" y="24" width="30" height="4" rx="2" fill="#7d8594"/>
+  <rect x="9" y="41" width="46" height="14" rx="5" fill="#ffffff"/>
+  <rect x="14" y="45.5" width="11" height="5" rx="2.5" fill="#1a1c22"/>
+  <rect x="27" y="44" width="16" height="8" rx="2.5" fill="#4d8eff"/>
+  <rect x="46" y="43.5" width="2.5" height="9" rx="1.25" fill="#1a1c22"/>
+</svg>

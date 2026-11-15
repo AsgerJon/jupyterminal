@@ -10,6 +10,7 @@ import sys
 
 from . import __version__
 from . import config as _config
+from . import desktop as _desktop
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -31,6 +32,10 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--print-default-config", action="store_true",
                         help="print a configuration file with every "
                              "default and exit")
+    parser.add_argument("--install-desktop-entry", action="store_true",
+                        help="put the program into the menus of the "
+                             "desktop, which also gives its windows their "
+                             "icon there, and exit")
     return parser
 
 
@@ -39,6 +44,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.print_default_config:
         sys.stdout.write(_config.DEFAULT_CONFIG)
         return 0
+    if args.install_desktop_entry:
+        written = _desktop.install(_desktop.launcher())
+        print(f"jupyterminal: wrote {written}; delete that file to take "
+              "the program out of the menus again")
+        return 0
 
     path = args.config or _config.default_path()
     config = _config.load(path)
@@ -46,7 +56,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"jupyterminal: {warning}", file=sys.stderr)
 
     # Imported late so that --help and --version need no display.
-    from PySide6.QtCore import QMetaObject, Qt
+    from PySide6.QtCore import QMetaObject, QStandardPaths, Qt
+    from PySide6.QtGui import QIcon
     from PySide6.QtWidgets import QApplication
 
     from .session import Session
@@ -64,7 +75,14 @@ def main(argv: list[str] | None = None) -> int:
         signal.signal(number, lambda *_: QMetaObject.invokeMethod(
             app, "quit", Qt.ConnectionType.QueuedConnection))
     app.setApplicationName("jupyterminal")
-    app.setDesktopFileName("jupyterminal")
+    app.setWindowIcon(QIcon(_desktop.icon_path()))
+    # The window belongs to the desktop entry of that name when one is
+    # installed.  Naming an entry that does not exist only earns a
+    # complaint from the desktop ("App info not found") at every start.
+    if QStandardPaths.locate(
+            QStandardPaths.StandardLocation.ApplicationsLocation,
+            "jupyterminal.desktop"):
+        app.setDesktopFileName("jupyterminal")
 
     shell = find_shell(args.shell or config.shell)
     if shutil.which(shell) is None:

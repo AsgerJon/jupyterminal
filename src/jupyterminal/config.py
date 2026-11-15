@@ -44,6 +44,9 @@ DEFAULT_KEYS: dict[str, list[str]] = {
     "blocks.toggle_collapse": [],
 }
 
+#: The ways a command can be typed; the first is the default.
+INPUTS = ("editor", "shell")
+
 DEFAULT_CONFIG = '''\
 # jupyterminal configuration.  Every key is optional.
 
@@ -62,6 +65,11 @@ scrollback_lines = 2000000
 # block instead of landing on the prompt.
 divert_background_output = true
 confirm_multiline_paste = true
+# How a command is typed.  "editor": in a text box that edits like every
+# other one on the desktop: the mouse places the cursor, Shift and the
+# arrows select, Ctrl+C, Ctrl+X and Ctrl+V are the clipboard, Ctrl+Z takes
+# back.  "shell": in the shell's own line editor, as in other terminals.
+input = "editor"
 # Characters besides letters and digits that a double-click treats as
 # part of a word.
 word_characters = "-_./~:@%+#=?&"
@@ -110,7 +118,7 @@ toggle_collapse = []    # unbound: any printable key returns to the input
 # dim = "#7d8594"
 # header_background = "#22252d"
 # header_foreground = "#eef0f4"
-# divider = "#2b2f39"
+# divider = "#525a6e"
 # selected_background = "#1c2738"
 # selected_header = "#25344f"
 # selected_bar = "#4d8eff"
@@ -148,6 +156,7 @@ class Config:
     scrollback_lines: int = 2_000_000
     divert_background_output: bool = True
     confirm_multiline_paste: bool = True
+    input: str = "editor"
     word_characters: str = "-_./~:@%+#=?&"
     bell: str = "none"
     allow_clipboard_write: bool = True
@@ -208,6 +217,13 @@ def load(path: str | None = None) -> Config:
          "divert_background_output", bool)
     take("terminal", "confirm_multiline_paste",
          "confirm_multiline_paste", bool)
+    take("terminal", "input", "input", str)
+    if config.input not in INPUTS:
+        config.warnings.append(
+            f"{path}: [terminal] input should be one of "
+            + ", ".join(repr(name) for name in INPUTS)
+            + f", not {config.input!r}")
+        config.input = INPUTS[0]
     take("terminal", "word_characters", "word_characters", str)
     take("terminal", "bell", "bell", str)
     take("terminal", "allow_clipboard_write", "allow_clipboard_write", bool)

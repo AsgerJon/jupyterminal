@@ -17,7 +17,7 @@ DEFAULTS = {
     "dim": "#7d8594",
     "header_background": "#22252d",
     "header_foreground": "#eef0f4",
-    "divider": "#2b2f39",
+    "divider": "#525a6e",
     "selected_background": "#1c2738",
     "selected_header": "#25344f",
     "selected_bar": "#4d8eff",
@@ -70,6 +70,16 @@ def rgb(text: str) -> int:
 
 # -- the colours -------------------------------------------------------------
 
+def test_the_line_between_blocks_stands_out_from_what_it_separates():
+    """Clearly lighter than every background a block can have, so that
+    where one block ends and the next begins is seen at a glance."""
+    theme = Theme()
+    line = theme.divider.lightness()
+    for name in ("background", "header_background", "selected_background",
+                 "selected_header", "failed_background", "failed_header"):
+        assert line - getattr(theme, name).lightness() >= 30, name
+
+
 def test_the_default_theme():
     for theme in (Theme(), Theme(None), Theme({})):
         assert colours(theme) == DEFAULTS
@@ -99,7 +109,7 @@ def test_a_value_that_is_no_colour_is_reported_and_the_default_kept():
         f'colors.dim = true is not a color: {HOW}; '
         'the default "#7d8594" is used',
         f'colors.divider = ["#ffffff"] is not a color: {HOW}; '
-        'the default "#2b2f39" is used',
+        'the default "#525a6e" is used',
         f'colors.accent = "" is not a color: {HOW}; '
         'the default "#58a6ff" is used']
     assert colours(theme) == DEFAULTS | {"cursor": "#010203"}

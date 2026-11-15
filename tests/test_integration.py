@@ -281,3 +281,44 @@ def test_the_buffer_file_holds_the_text_and_is_private(runtime):
 
 def test_the_key_that_takes_the_buffer():
     assert integration.SET_BUFFER_KEY == b"\x1b[7717;1~"
+
+
+def edit_file(runtime) -> bytes:
+    with open(runtime.edit_path, "rb") as handle:
+        return handle.read()
+
+
+def test_the_edit_file_holds_a_request_and_is_private(runtime):
+    runtime.write_edit("ls caf\xe9\n", 7, b"\t", "expand-or-complete", True)
+    # The cursor, the key, the widget to fall back on, that the text was
+    # edited since the last request, no number, and the text with a full
+    # stop behind its last newline.
+    assert edit_file(runtime) == \
+        b"7\n\t\nexpand-or-complete\n1\n\n" + "ls caf\xe9\n.".encode()
+    assert stat.S_IMODE(os.stat(runtime.edit_path).st_mode) == 0o600
+    runtime.write_edit("x", 0, b"\x1b[A", "", False)  # replaces, whole
+    assert edit_file(runtime) == b"0\n\x1b[A\n\n\n\nx."
+    # Half a character that cannot be written becomes a question mark.
+    runtime.write_edit("a\udc80", 1, b"\t", "", False)
+    assert edit_file(runtime) == b"1\n\t\n\n\n\na?."
+
+
+def test_the_look_file_holds_a_text_and_the_number_of_the_request(runtime):
+    runtime.write_look("git st", 6, 17)
+    # A look is at a text that was edited: nothing else brings one about.
+    with open(runtime.look_path, "rb") as handle:
+        assert handle.read() == b"6\n\n\n1\n17\ngit st."
+    assert stat.S_IMODE(os.stat(runtime.look_path).st_mode) == 0o600
+    runtime.write_look("caf\xe9", 0, 18)             # replaces, whole
+    with open(runtime.look_path, "rb") as handle:
+        assert handle.read() == b"0\n\n\n1\n18\n" + "caf\xe9.".encode()
+    assert edit_file_missing(runtime)                # a file of its own
+
+
+def edit_file_missing(runtime) -> bool:
+    return not os.path.exists(runtime.edit_path)
+
+
+def test_the_keys_that_ask_the_line_editor():
+    assert integration.EDIT_KEY == b"\x1b[7717;2~"
+    assert integration.LOOK_KEY == b"\x1b[7717;3~"

@@ -45,7 +45,7 @@ dev = [
 where = ["src"]
 
 [tool.setuptools.package-data]
-jupyterminal = ["shell/zsh/*.zsh"]
+jupyterminal = ["shell/zsh/*.zsh", "ui/*.svg"]
 
 #  Coverage is measured on every run, of the package and of the tests
 #  themselves, so a test that never runs shows up as well. The release

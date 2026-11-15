@@ -189,7 +189,10 @@ def test_wrapped_line_is_selected_and_copied_as_one(ui):
     assert block.view.out_rows == 3              # 100 characters, 40 columns
     h.drag(h.point(block, 0, 38), h.point(block, 1, 2))
     assert h.view.selection_text() == text[38:42]
-    h.click(block)
+    h.click(block)                               # lets go of the text
+    assert not h.view.has_text_selection() and h.view.selected == []
+    h.click(block, row=2)                        # selects the block
+    assert h.view.selected == [block.id]
     h.key(Qt.Key.Key_C, CTRL | SHIFT)
     assert h.clipboard() == text
 
@@ -709,15 +712,28 @@ def test_partial_selection_keeps_its_spaces(ui):
     assert h.view.selection_text() == "value"     # the line's end is trimmed
 
 
-def test_a_quiet_command_still_counts_its_seconds(ui):
+def test_a_quiet_command_still_counts_its_seconds(ui, monkeypatch):
+    from jupyterminal.session import block as block_module
     h = ui()
     h.session.feed(submit("sleep 100"))
     h.pump()
     block = h.session.blocks[-1]
     view = h.view
+
+    class Clock:
+        """The time of the blocks, standing still: a busy machine must not
+        add its own delay to what the test counts."""
+
+        now = block._t0 + 0.25
+
+        def monotonic(self) -> float:
+            return self.now
+
+    clock = Clock()
+    monkeypatch.setattr(block_module, "time", clock)
     view.frame()
     assert ("spinner", "", 3) in block.view.items
-    block._t0 -= 2.6                             # ... 2.6 seconds later
+    clock.now += 2.38                    # ... 2.6 seconds after it began
     view.frame()
     assert ("spinner", "2.6s", 7) in block.view.items
 

@@ -20,8 +20,9 @@ import traceback
 from typing import Callable
 
 from ..shell import PtyProcess, ShellRuntime, decode_field
-from ..shell.integration import SET_BUFFER_KEY
+from ..shell.integration import EDIT_KEY, LOOK_KEY, SET_BUFFER_KEY
 from ..term import LineStore, Screen, Terminal
+from ..term.charwidth import str_width
 from ..term.keys import encode_paste
 from .block import BACKGROUND, COMMAND, Block, git_branch
 
@@ -29,6 +30,18 @@ STARTUP = "startup"
 PROMPT = "prompt"
 RUNNING = "command"
 CLOSED = "closed"
+
+#: A command handed to the shell normally starts within milliseconds.
+#: One that has not started after this many seconds is being asked about
+#: (whether to correct a misspelt name, say) and the question is shown.
+ASK_AFTER = 0.3
+#: The line editor answers what the text box asks of it within
+#: milliseconds, too.  If it has put something on the screen and is still
+#: at it after this long, it is showing a menu or asking a question, and
+#: the keyboard is its own until it answers.
+EDIT_SHOWS_AFTER = 0.15
+#: One that shows nothing gets this long: a completion can be slow.
+EDIT_ASK_AFTER = 3.0
 
 _PRINTS = frozenset(("put_text", "repeat_last", "align_test"))
 _MUTATORS = frozenset((
@@ -133,6 +146,18 @@ class HoldProxy:
         calls.clear()
 
 
+def _spans(text: str) -> list[tuple[int, int, str]]:
+    """The colors of a command line as the shell sends them: a "start end
+    style" to the line."""
+    spans = []
+    for line in text.split("\n"):
+        start, _, rest = line.partition(" ")
+        end, _, style = rest.partition(" ")
+        if start.isdecimal() and end.isdecimal() and style:
+            spans.append((int(start), int(end), style))
+    return spans
+
+
 def _trim_blank(lines: list[tuple]) -> list[tuple]:
     """Drop blank lines from both ends."""
     start = 0
@@ -206,6 +231,46 @@ class Session:
         self.on_bell: Callable[[], None] | None = None
         self.on_clipboard: Callable[[str, str], None] | None = None
         self.on_drop: Callable[[list[Block]], None] | None = None
+        #: Called with the text of a command the shell did not run
+        #: because it was not complete.
+        self.on_incomplete: Callable[[str], None] | None = None
+        #: A command handed over by run_command() that the shell has
+        #: neither started nor turned down yet, and when it was handed
+        #: over.
+        self._submitted: str | None = None
+        self._submitted_at = 0.0
+        #: How many prompts the shell has begun: whoever shows where the
+        #: shell is looks again when this has grown.
+        self.prompts = 0
+        #: Called with text and cursor once the line editor has done what
+        #: ask_editor() asked for.
+        self.on_edited: Callable[[str, int], None] | None = None
+        #: What ask_editor() asked the line editor and it has not
+        #: answered yet: when, the text and the cursor it was handed, and
+        #: the version of the session at that moment.  A later version
+        #: means that something has come from the shell since.
+        self._asked: tuple[float, str, int, int] | None = None
+        #: After an answer, the text that follows the line editor's
+        #: cursor: what shows under all of its text is there for the text
+        #: box (a list of completions).  None when nothing is listed.
+        self._listing: str | None = None
+        #: Called with a text, the line the shell's plugins would go on
+        #: to from it, and the colors they give it: ``(start, end,
+        #: style)``, in characters, the style as zsh writes one.
+        self.on_hints: Callable[[str, str, list], None] | None = None
+        #: Whether the text was edited (see look()) since the line editor
+        #: last answered ask_editor(): if so, the next key it is asked
+        #: about does not follow the one before.
+        self._touched = False
+        #: Whether the shell's configuration has plugins that have
+        #: something to say about a command line; every prompt tells.
+        self.hinting: bool
+        #: Looking at a text (see look()): how many times it was asked
+        #: for, the number and text of the request that is not answered
+        #: yet, and a newer text that waits for that answer.
+        self._looks = 0
+        self._look: tuple[int, str] | None = None
+        self._wanted: tuple[str, int] | None = None
 
         startup = self._open_bg()
         startup.label = "background output · shell startup"
@@ -221,6 +286,7 @@ class Session:
             "C": self._mark_command, "A": self._mark_prompt_start,
             "T": self._mark_trash, "I": self._mark_line_init,
             "F": self._mark_line_finish, "S": self._mark_sync,
+            "B": self._mark_buffer, "V": self._mark_view,
         }
 
     # ------------------------------------------------------------------
@@ -319,6 +385,80 @@ class Session:
         self.write(SET_BUFFER_KEY)
         return True
 
+    def run_command(self, text: str) -> bool:
+        """Hand ``text`` to the shell as a command and submit it: what
+        pressing Enter does for an input that is edited outside the
+        shell.  False when there is nothing to run or nobody to take it.
+        """
+        if not text.strip() or not self.input_ready or self.editing:
+            return False
+        if not self.set_command_buffer(text):
+            return False
+        self._submitted = text
+        self._submitted_at = time.monotonic()
+        # Until the line editor says it is back, it is busy with this.
+        self.line_ready = False
+        self.write(b"\r")
+        return True
+
+    def ask_editor(self, key: bytes, fallback: str, text: str,
+                   cursor: int) -> bool:
+        """Have the shell's line editor do on ``text`` what ``key`` does
+        in the shell: complete the word at the cursor, fetch a line of
+        the history.  Whoever edits commands outside the shell gets at
+        what only the shell knows this way.  ``cursor`` counts characters;
+        ``fallback`` names the widget to run where the key runs nothing
+        of use.  The answer comes through ``on_edited``.  False when the
+        line editor cannot be asked now.
+        """
+        if not self.input_ready or self.editing or self.runtime is None:
+            return False
+        self.runtime.write_edit(text, cursor, key, fallback, self._touched)
+        self.drop_list()
+        self._asked = (time.monotonic(), text, cursor, self.version)
+        self.write(EDIT_KEY)
+        return True
+
+    def look(self, text: str, cursor: int) -> None:
+        """The text was edited and is ``text`` now.  Ask what the shell's
+        plugins make of it: the line they would go on to, the colors they
+        give it.  The answer comes through ``on_hints``, unless a newer
+        text has been handed in by then: of texts that follow each other
+        quickly only the last is looked at.
+        """
+        self._touched = True
+        self._wanted = (text, cursor)
+        self._look_now()
+
+    def _look_now(self) -> None:
+        """Send the text that waits to be looked at, if the line editor
+        is free to do so."""
+        wanted = self._wanted
+        if wanted is None or self._look is not None \
+                or not self.input_ready or self.editing \
+                or not self.hinting:
+            return
+        self._wanted = None
+        text, cursor = wanted
+        if not text:
+            # Nothing to say about no text, and no need to ask.
+            if self.on_hints:
+                self.on_hints("", "", [])
+            return
+        self._looks += 1
+        self.runtime.write_look(text, cursor, self._looks)
+        self._look = (self._looks, text)
+        self.write(LOOK_KEY)
+
+    def drop_list(self) -> None:
+        """What the line editor lists under its text is of no use any
+        more: the text it was for has changed."""
+        if self._listing is not None:
+            self._listing = None
+            self.version += 1
+            if self.on_change:
+                self.on_change()
+
     def resize(self, cols: int, rows: int, width: int = 0,
                height: int = 0) -> None:
         cols = max(2, cols)
@@ -351,6 +491,7 @@ class Session:
         self.term.set_screen(self.input)
         self.state = CLOSED
         self.line_ready = False
+        self._asked = None
         if self.pty is not None:
             self.pty.close()
             self.exit_status = self.pty.poll()
@@ -374,6 +515,63 @@ class Session:
     def fullscreen(self) -> bool:
         """A full-screen program has taken over the view."""
         return self.term.alt_active
+
+    @property
+    def input_ready(self) -> bool:
+        """The shell's line editor waits for a command and none is on
+        its way to it: one can be handed over."""
+        return (self.line_ready and self._submitted is None
+                and not self.term.alt_active and not self._editor_shows())
+
+    @property
+    def editing(self) -> bool:
+        """The line editor was asked something by ask_editor() and has
+        not answered yet."""
+        return self._asked is not None
+
+    def _editor_shows(self) -> bool:
+        """The line editor was asked something and needs the keyboard for
+        it: it has put a menu or a question on the screen, or it has been
+        at it for very long."""
+        asked = self._asked
+        return asked is not None and self._overdue(asked[0], asked[3])
+
+    def _overdue(self, since: float, version: int) -> bool:
+        waited = time.monotonic() - since
+        return waited > EDIT_ASK_AFTER or (
+            self.version != version and waited > EDIT_SHOWS_AFTER)
+
+    @property
+    def shell_asks(self) -> bool:
+        """The shell wants an answer before it goes on, and what it asks
+        is on its own input line.  Either a command was handed over a
+        while ago and has neither started nor been turned down, or the
+        line editor shows something for what ask_editor() asked."""
+        if self._editor_shows():
+            return True
+        return (self._submitted is not None
+                and time.monotonic() - self._submitted_at > ASK_AFTER)
+
+    def listed(self) -> tuple[int, int]:
+        """What the line editor shows for the text box after an answer to
+        ask_editor(), a list of completions as a rule: the first row of
+        the input screen under the editor's own text, and how many rows
+        there are from there on."""
+        tail = self._listing
+        if tail is None or self.state != PROMPT:
+            return 0, 0
+        screen = self.input
+        # The text after the cursor takes the rest of the cursor's row,
+        # and a row more for every line it has and every time one wraps.
+        first = screen.cy + 1
+        width = screen.cx
+        for index, line in enumerate(tail.split("\n")):
+            if index:
+                first += 1
+                width = 0
+            width += str_width(line)
+            first += (width - 1) // self.cols if width else 0
+        return first, max(0, screen.extent() - first)
 
     def cursor_screen(self) -> Screen:
         """The screen whose cursor is the terminal's cursor."""
@@ -561,6 +759,7 @@ class Session:
         if len(fields) > 3 and fields[3].isdecimal():
             # KEYTIMEOUT is in hundredths of a second.
             self._key_delay = min(5.0, int(fields[3]) / 100.0) + 0.1
+        self.hinting = self.runtime is not None and fields[4:5] == ["1"]
 
     def _cycle(self, status: int | None) -> None:
         self._check_clear()
@@ -580,10 +779,23 @@ class Session:
         self.term.reset_input_modes()
         self.state = PROMPT
         self.line_ready = False
+        self._submitted = None
+        asked, self._asked = self._asked, None
+        self._listing = None
+        # A new line: no look is under way, and what the shell has to
+        # say about plugins is yet to come.
+        self._look = None
+        self.hinting = False
+        self.prompts += 1
         self._clear_seen = screen.clear_count
         self._t_line = None
         self._f_seen = False
         self._f_bufs = []
+        if asked is not None and self.on_edited:
+            # The line editor gave up what it was asked for (it was
+            # interrupted, as a rule): whoever asked has the text as it
+            # was.
+            self.on_edited(asked[1], asked[2])
 
     def _prompt_leftovers(self) -> None:
         """A prompt cycle ended and no command ran.
@@ -632,6 +844,13 @@ class Session:
         self.running = block
         self.state = RUNNING
         self.line_ready = False
+        self._submitted = None
+        if self._asked is not None:
+            # What the line editor was asked to work on has been run
+            # instead: whoever asked has nothing left of it.
+            self._asked = None
+            if self.on_edited:
+                self.on_edited("", 0)
         self.term.set_screen(block.screen)
         self._clear_seen = 0
 
@@ -663,8 +882,54 @@ class Session:
             self._t_line = self.input.lines_above_cursor()
 
     def _mark_line_init(self, fields: list[str]) -> None:
+        """I: the line editor starts on a line."""
+        text = self._submitted
+        called_off = text is not None and self._f_seen
         self._f_seen = False
+        if called_off:
+            # The shell took the line and its editor is back, with no
+            # command started and no new prompt: it wants the rest of a
+            # command that is not complete.  The command is called off
+            # and whoever handed it over gets it back; the editor counts
+            # as ready again with the prompt that follows.
+            self._submitted = None
+            self.write(b"\x03")
+            if self.on_incomplete:
+                self.on_incomplete(text)
+            return
         self.line_ready = self.state == PROMPT
+        self._look_now()                # a text may have waited for this
+
+    def _mark_buffer(self, fields: list[str]) -> None:
+        """B: the line editor's text after what ask_editor() asked for,
+        and what the plugins make of that text."""
+        if self._asked is None or len(fields) < 4:
+            return
+        self._asked = None
+        self._touched = False
+        text = decode_field(fields[1])
+        at = fields[0]
+        cursor = min(int(at), len(text)) if at.isdecimal() else len(text)
+        self._listing = text[cursor:]
+        # The answer says what the plugins make of this text; a look at
+        # the one before it is of no use any more.
+        self._wanted = None
+        if self.on_edited:
+            self.on_edited(text, cursor)
+        if self.on_hints:
+            self.on_hints(text, decode_field(fields[2]),
+                          _spans(decode_field(fields[3])))
+
+    def _mark_view(self, fields: list[str]) -> None:
+        """V: what the plugins make of a text look() asked about."""
+        look = self._look
+        if look is None or len(fields) < 3 or fields[0] != str(look[0]):
+            return
+        self._look = None
+        if self._wanted is None and self.on_hints:
+            self.on_hints(look[1], decode_field(fields[1]),
+                          _spans(decode_field(fields[2])))
+        self._look_now()                # a newer text may be waiting
 
     def _mark_line_finish(self, fields: list[str]) -> None:
         """F: the line editor hands over a line."""
