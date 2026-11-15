@@ -10,6 +10,7 @@ import os
 import select
 import signal
 import struct
+import sys
 import termios
 import threading
 import time
@@ -132,7 +133,12 @@ def test_the_utf8_flag_has_its_number_on_every_python():
 
 
 def test_the_child_runs_on_a_terminal_of_the_given_size(spawn):
-    proc = spawn("/bin/sh", "-c", "stty size && tty", cols=132, rows=43)
+    # (Asked of the terminal by Python: what stty and tty print is not the
+    # same on every system.)
+    proc = spawn(sys.executable, "-c",
+                 "import os; size = os.get_terminal_size(0); "
+                 "print(size.lines, size.columns); print(os.ttyname(0))",
+                 cols=132, rows=43)
     lines = read_to_end(proc).split(b"\r\n")
     assert lines[0] == b"43 132"
     assert lines[1].startswith(b"/dev/pts/") and lines[2:] == [b""]

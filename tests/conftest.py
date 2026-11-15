@@ -147,6 +147,18 @@ def install_smi(home: str) -> None:
 
 # -- a real shell ------------------------------------------------------------
 
+def shown(session) -> str:
+    """What a session shows, as text: its blocks and the shell's own line.
+    A test that waited in vain says with it what there was instead."""
+    said = [f"state: {session.state}"]
+    for block in session.blocks:
+        said.append(f"-- {block.kind} block: {block.command}")
+        said.extend(block.lines())
+    screen = session.input
+    said.append("-- the shell's own line")
+    said.extend(row.text().rstrip() for row in screen.grid[:screen.extent()])
+    return "\n".join(said)
+
 
 class LiveShell:
     """A session with a real shell, pumped by hand instead of by Qt."""
@@ -201,7 +213,8 @@ class LiveShell:
         """Wait until the prompt is idle, and then a moment longer: an
         interrupt that reaches zsh in the very instant it answers the idle
         check (some two milliseconds) is put off until the next key."""
-        assert self.pump(self.idle_prompt), "the prompt never became idle"
+        assert self.pump(self.idle_prompt), \
+            "the prompt never became idle\n" + shown(self.session)
         self.idle(0.3)
 
     def job_in_foreground(self) -> bool:
@@ -210,7 +223,8 @@ class LiveShell:
         return os.tcgetpgrp(pty.fd) != pty.pid
 
     def wait_prompt(self, timeout: float = 20.0) -> None:
-        assert self.pump(self.at_prompt, timeout), "no prompt"
+        assert self.pump(self.at_prompt, timeout), \
+            "no prompt\n" + shown(self.session)
 
     def type(self, text: str | bytes) -> None:
         self.session.write(text if isinstance(text, bytes)
@@ -225,7 +239,8 @@ class LiveShell:
         def done() -> bool:
             return session._next_id > first_new and self.at_prompt()
 
-        assert self.pump(done, timeout), f"did not finish: {command!r}"
+        assert self.pump(done, timeout), \
+            f"did not finish: {command!r}\n" + shown(session)
         new = [b for b in session.blocks if b.id >= first_new
                and b.is_command]
         assert new, f"no block for {command!r}"
@@ -254,12 +269,14 @@ def shell(tmp_path):
     """Factory for live shells; every shell is closed afterwards."""
     made: list[LiveShell] = []
 
-    def factory(rc: str = "", **kwargs) -> LiveShell:
+    def factory(rc: str = "", wait: bool = True, **kwargs) -> LiveShell:
         home = tmp_path / f"home{len(made)}"
         home.mkdir()
         live = LiveShell(home, rc, **kwargs)
         made.append(live)
-        live.wait_prompt()
+        # (Unless the test is about a shell that does not get that far.)
+        if wait:
+            live.wait_prompt()
         return live
 
     yield factory
@@ -395,7 +412,7 @@ class LiveWindow:
         self.session.start(ZSH, cwd=self.home, env=env)
         self.view.attach_io()
         self.window.show()
-        assert self.wait(self.at_prompt), "no prompt"
+        assert self.wait(self.at_prompt), "no prompt\n" + shown(self.session)
 
     def wait(self, condition=None, timeout: float = 20.0) -> bool:
         return pump_qt(self.app, condition, timeout)
@@ -411,7 +428,8 @@ class LiveWindow:
         first_new = session._next_id
         session.write(command.encode() + b"\r")
         assert self.wait(lambda: session._next_id > first_new
-                         and self.at_prompt(), timeout), command
+                         and self.at_prompt(), timeout), \
+            command + "\n" + shown(session)
         return [b for b in session.blocks if b.id >= first_new
                 and b.is_command][0]
 

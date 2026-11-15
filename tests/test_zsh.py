@@ -9,7 +9,7 @@ import time
 
 import pytest
 
-from conftest import SMI_COPIED, SMI_PROGRAMS, SMI_TEXT, install_smi
+from conftest import SMI_COPIED, SMI_PROGRAMS, SMI_TEXT, install_smi, shown
 from test_zsh_configs import DISTRIBUTION_ZSHRC
 from jupyterminal.session import (BACKGROUND, BOTH, CLOSED, FilterSpec,
                                   copy_text, output_text)
@@ -113,6 +113,36 @@ def test_waiting_for_something_that_never_comes_says_so(shell):
     assert live.pump(lambda: False, 0.2) is False
     assert 0.2 <= time.monotonic() - began < 5.0
     assert live.at_prompt()
+
+
+def test_a_shell_that_asks_before_its_first_prompt_is_answered(shell):
+    """What zsh's completion system asks where its directories can be
+    written to by others, as on the machines of the release workflows."""
+    question = "Ignore insecure directories and continue [y] or abort [n]?"
+    live = shell("print insecure directories found\n"
+                 f"read -q '?{question} ' || exit 3\n"
+                 "PS1='%% '\n", wait=False)
+    session = live.session
+    assert live.pump(lambda: question in shown(session))
+    # A test that waits for a prompt now says what there is instead.
+    with pytest.raises(AssertionError) as waited:
+        live.wait_prompt(0.2)
+    said = str(waited.value)
+    places = [said.index(part) for part in (
+        "no prompt", "state: startup", "-- background block:",
+        "insecure directories found", question, "-- the shell's own line")]
+    assert places[0] == 0 and places == sorted(places)
+    # The question is on the screen, the answer goes to the shell, and
+    # the session goes on from there.
+    assert session.blocks[0].lines() == ["insecure directories found",
+                                         question]
+    live.type("y")
+    live.wait_prompt()
+    assert live.input_text() == "%"
+    assert background(session)[0].lines()[-1] == question + " y"
+    assert live.run("echo on").lines() == ["on"]
+    assert shown(session).split("\n")[-4:] == [
+        "-- command block: echo on", "on", "-- the shell's own line", "%"]
 
 
 def test_exec_zsh_keeps_blocks_working(shell):
