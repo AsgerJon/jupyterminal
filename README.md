@@ -37,6 +37,23 @@ your desktop, for you alone, started the way you started it just then.
 That entry is also what gives its windows their own icon in the task bar:
 on Wayland a desktop takes a window's icon from nowhere else.
 
+On Arch Linux the program is a package like any other, built from the
+recipe in `packaging/arch`. It comes with the menu entry and the icon for
+every user:
+
+```sh
+mkdir jupyterminal-package && cd jupyterminal-package
+curl -O https://raw.githubusercontent.com/AsgerJon/jupyterminal/main/packaging/arch/PKGBUILD
+curl -O https://raw.githubusercontent.com/AsgerJon/jupyterminal/main/packaging/arch/jupyterminal.install
+makepkg -si
+```
+
+The same lines install a newer release once there is one, and
+`sudo pacman -Rns jupyterminal` removes the program again, with
+everything the package installed. Your own settings in
+`~/.config/jupyterminal` are not the package's and stay. The recipe is
+kept here and not in the AUR.
+
 Python 3.11 is left out on purpose. PySide6 6.12.0 ends the interpreter
 there ("deallocating None") after a few thousand calls into Qt
 (PYSIDE-3474); from 3.12 on that kind of mistake in a binding can no

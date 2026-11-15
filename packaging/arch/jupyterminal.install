@@ -1,0 +1,24 @@
+# What pacman says when the package comes and when it goes.
+#
+# "pacman -R jupyterminal" takes away everything the package installed,
+# the compiled Python files included: nothing of it is left on the system.
+# What a user made for themselves is theirs, and no package touches a
+# home directory; the lines below say where to look.
+
+post_install() {
+  echo "==> jupyterminal is in the menus of every user, with its icon."
+  echo "    An entry that 'jupyterminal --install-desktop-entry' wrote for"
+  echo "    one user before stands in front of it for that user, and still"
+  echo "    starts the program the way it was started then.  To use this"
+  echo "    package instead, delete"
+  echo "        ~/.local/share/applications/jupyterminal.desktop"
+}
+
+post_remove() {
+  echo "==> jupyterminal is gone, with everything the package installed."
+  echo "    Left for each user to keep or to delete:"
+  echo "        ~/.config/jupyterminal/    settings, if any were made"
+  echo "        ~/.local/share/applications/jupyterminal.desktop"
+  echo "                                   an entry of one's own, if"
+  echo "                                   --install-desktop-entry was used"
+}

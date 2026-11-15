@@ -4,11 +4,13 @@ a version to the outside world:
 - 'pyproject.toml': the 'version = "..."' line the build reads.
 - 'src/jupyterminal/__init__.py': the '__version__' attribute.
 - 'README.md': the heading line starting with '# jupyterminal v'.
+- 'packaging/arch/PKGBUILD': the '_tag=' line, which names the release
+  the package for Arch Linux installs by the tag the workflow gives it.
 
 The version string is read from the environment variable named by the
 first argument, defaulting to 'VERSION_INFO'. The release workflows call
 'version_get.py' to export the resolved version under that name, then
-call this script to write it into the three files before building.
+call this script to write it into the four files before building.
 
 The README heading derives a human-readable qualifier from the version
 string itself: a version containing '-rc' is marked '(release
@@ -194,7 +196,8 @@ def _readmeHeading(versionStr: str) -> str:
 def _stampAll(versionStr: str) -> None:
   """
   This function stamps the given version string into 'pyproject.toml',
-  'src/jupyterminal/__init__.py' and 'README.md'.
+  'src/jupyterminal/__init__.py', 'README.md' and
+  'packaging/arch/PKGBUILD'.
 
   Parameters
   ----------
@@ -206,9 +209,11 @@ def _stampAll(versionStr: str) -> None:
   pyprojectPath = os.path.join(root, 'pyproject.toml')
   packagePath = os.path.join(root, 'src', 'jupyterminal', '__init__.py')
   readmePath = os.path.join(root, 'README.md')
+  pkgbuildPath = os.path.join(root, 'packaging', 'arch', 'PKGBUILD')
   _stampPrefix(pyprojectPath, 'version', 'version = "%s"' % versionStr)
   _stampPrefix(packagePath, '__version__', "__version__ = '%s'" % versionStr)
   _stampPrefix(readmePath, README_PREFIX, _readmeHeading(versionStr))
+  _stampPrefix(pkgbuildPath, '_tag=', '_tag=%s' % versionStr)
 
 
 def main(*args: str, ) -> int:

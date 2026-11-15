@@ -148,9 +148,10 @@ jobs:
 
       # Write VERSION_INFO into pyproject.toml (the build reads its
       # version from there), into src/jupyterminal/__init__.py (so
-      # 'jupyterminal.__version__' matches the published version) and
-      # into the README.md heading.
-      - name: Stamp version into pyproject, package and README
+      # 'jupyterminal.__version__' matches the published version), into
+      # the README.md heading and into packaging/arch/PKGBUILD (the
+      # package for Arch Linux installs the release by its tag).
+      - name: Stamp version into pyproject, package, README and PKGBUILD
         run: python bin/release_tooling/version_stamp.py VERSION_INFO
 
       # With what was just installed, and nothing fetched on the side.
@@ -169,7 +170,7 @@ jobs:
         run: |
           git config user.name "Asger Jon Vistisen"
           git config user.email "asgerjon2@gmail.com"
-          git add bin/release_tooling/VERSION pyproject.toml src/jupyterminal/__init__.py README.md
+          git add bin/release_tooling/VERSION pyproject.toml src/jupyterminal/__init__.py README.md packaging/arch/PKGBUILD
           git commit -m "dev ${{ env.VERSION_INFO }}"
           git push origin HEAD:${{ github.ref }}
 

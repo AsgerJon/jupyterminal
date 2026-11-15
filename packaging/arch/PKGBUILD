@@ -1,0 +1,74 @@
+# Maintainer: Asger Jon Vistisen (github.com/AsgerJon)
+#
+# The package of jupyterminal for Arch Linux.  It is kept here, next to
+# the program, and not in the AUR.  With this file and
+# jupyterminal.install, which lies beside it, in an empty directory,
+#
+#   makepkg -si
+#
+# installs the release named below, and later the one that is the newest
+# by then.  The program is removed like every package:
+#
+#   sudo pacman -Rns jupyterminal
+
+pkgname=jupyterminal
+# The release this installs, by its tag on GitHub.  The release workflows
+# write this line; nothing else in this file changes from one release to
+# the next.
+_tag=0.0.1-dev0
+# pacman takes 0.0.1dev0 and 0.0.1rc0 for older than 0.0.1, and
+# 0.0.1.dev0 for newer.
+pkgver=${_tag//-/}
+pkgrel=1
+pkgdesc="A terminal emulator in which typing and copying work as everywhere else on the desktop"
+arch=('any')
+url="https://github.com/AsgerJon/jupyterminal"
+license=('Apache-2.0')
+depends=('python' 'pyside6' 'zsh')
+makedepends=('git' 'python-build' 'python-installer' 'python-setuptools'
+             'python-wheel')
+optdepends=('zsh-syntax-highlighting: the colors of a command line, in the text box'
+            'zsh-autosuggestions: how a line might go on, behind the cursor')
+# What pacman says after installing and after removing.
+install=$pkgname.install
+source=("$pkgname::git+$url.git#tag=$_tag")
+sha256sums=('SKIP')
+
+# The Python of the system, by its path: with an environment of conda or
+# venv active in the shell that runs makepkg, "python" is another one,
+# and the package would be built for that one and into its directories.
+_python=/usr/bin/python
+
+build() {
+  cd "$pkgname"
+  "$_python" -m build --wheel --no-isolation
+}
+
+# No check(): the tests need vim, less and htop besides zsh, and the
+# release workflows have run them on this very commit, on every Python the
+# program supports, before the tag was made.
+
+package() {
+  cd "$pkgname"
+  "$_python" -m installer --destdir="$pkgdir" dist/*.whl
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm644 src/jupyterminal/ui/jupyterminal.svg \
+    "$pkgdir/usr/share/icons/hicolor/scalable/apps/jupyterminal.svg"
+  # The entry that puts the program into the menus of the desktop and
+  # gives its windows their icon.  It is the one that "jupyterminal
+  # --install-desktop-entry" writes for one user, with the icon by its
+  # name; tests/test_desktop.py holds the two together.
+  install -Dm644 /dev/stdin \
+    "$pkgdir/usr/share/applications/jupyterminal.desktop" <<'EOF'
+[Desktop Entry]
+Type=Application
+Name=jupyterminal
+GenericName=Terminal
+Comment=A terminal in which typing and copying work as everywhere else
+Exec=jupyterminal
+Icon=jupyterminal
+Terminal=false
+Categories=System;TerminalEmulator;
+StartupWMClass=jupyterminal
+EOF
+}

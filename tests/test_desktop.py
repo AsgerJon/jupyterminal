@@ -132,6 +132,25 @@ def test_every_special_character_puts_an_argument_in_quotes():
     assert exec_words(line.removeprefix("Exec=")) == command
 
 
+def test_the_package_for_arch_installs_the_same_entry(monkeypatch):
+    """A package puts the entry where every user has it, with the icon
+    by the name it is installed under instead of by its place in the
+    package.  The rest is the entry the program writes itself."""
+    recipe = os.path.join(os.path.dirname(os.path.dirname(__file__)),
+                          "packaging", "arch", "PKGBUILD")
+    with open(recipe, encoding="utf-8") as handle:
+        text = handle.read()
+    installed = text.split("<<'EOF'\n")[1].split("EOF\n")[0]
+    monkeypatch.setattr(desktop, "icon_path", lambda: "jupyterminal")
+    assert installed == desktop.entry(["jupyterminal"])
+    # And the icon goes where a desktop looks that name up.
+    assert ("src/jupyterminal/ui/jupyterminal.svg \\\n"
+            '    "$pkgdir/usr/share/icons/hicolor/scalable/apps/'
+            'jupyterminal.svg"\n') in text
+    assert text.count("jupyterminal.desktop") == 1
+    assert '"$pkgdir/usr/share/applications/jupyterminal.desktop"' in text
+
+
 # -- how the program was started ---------------------------------------------
 
 def test_the_program_is_started_again_the_way_it_was_started(monkeypatch):
