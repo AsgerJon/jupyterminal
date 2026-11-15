@@ -10,7 +10,8 @@ cumulative. The very first run seeds the ledger by counting every token to
 date.
 
 Counting reads the local Claude Code session transcripts, which record a
-token 'usage' object and a UTC 'timestamp' on every assistant message.
+token 'usage' object and a UTC 'timestamp' on every assistant message. A
+message is recorded once for each of its parts, and counted once.
 Claude Code stores these per project under
 '~/.claude/projects/<encoded-path>', where the encoded path is the
 repository's absolute path with each separator replaced by a dash. Only
@@ -239,26 +240,32 @@ def _nowStamp() -> str:
   return datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%fZ')
 
 
-def countSince(transcriptDir: str, sinceTimestamp: str = None) -> int:
+def _replies(transcriptDir: str) -> list:
   """
-  This function sums every token type across all transcript messages newer
-  than 'sinceTimestamp'. With no timestamp, every message counts.
+  This function collects the replies recorded in the transcripts beneath
+  'transcriptDir', each with the time it began and its token usage.
+
+  A transcript holds one record for every part of a reply: its thinking,
+  its text, each call of a tool. Every one of them repeats the usage of
+  the whole reply, the later ones with the numbers as they stood when the
+  record was written. Adding up the records would count a reply once for
+  each of its parts. A reply is therefore taken once, by the last record
+  of it, and at the time of the first.
 
   Parameters
   ----------
   transcriptDir : str
     The absolute path to the transcript directory.
-  sinceTimestamp : str, optional
-    The UTC timestamp below which messages are ignored. None counts all.
 
   Returns
   -------
-  int
-    The grand total of tokens spent in the window.
+  list
+    One pair for each reply: the UTC timestamp of its first record, an
+    empty string where that record has none, and its 'usage' object.
   """
-  total = 0
+  replies = dict()
   for path in _transcriptFiles(transcriptDir):
-    for line in str.split(_readText(path), '\n'):
+    for number, line in enumerate(str.split(_readText(path), '\n')):
       if '"usage"' not in line:
         continue
       try:
@@ -267,18 +274,52 @@ def countSince(transcriptDir: str, sinceTimestamp: str = None) -> int:
         continue
       if not isinstance(record, dict):
         continue
-      if sinceTimestamp is not None:
-        stamp = record.get('timestamp')
-        if not isinstance(stamp, str) or stamp <= sinceTimestamp:
-          continue
       message = record.get('message')
-      usage = message.get('usage') if isinstance(message, dict) else None
+      if not isinstance(message, dict):
+        message = dict()
+      usage = message.get('usage')
       if not isinstance(usage, dict):
         usage = record.get('usage')
       if not isinstance(usage, dict):
         continue
-      for key in _TOKEN_KEYS:
-        total += usage.get(key, 0) or 0
+      stamp = record.get('timestamp')
+      if not isinstance(stamp, str):
+        stamp = ''
+      #  A reply is known by its own name and that of its request; a
+      #  record that names neither stands for itself.
+      if message.get('id') is None:
+        key = (path, number)
+      else:
+        key = (message.get('id'), record.get('requestId'))
+      began = replies[key][0] if key in replies else stamp
+      replies[key] = (min(began, stamp), usage)
+  return [*replies.values()]
+
+
+def countSince(transcriptDir: str, sinceTimestamp: str = None) -> int:
+  """
+  This function sums every token type across the replies that began after
+  'sinceTimestamp', each reply counted once. With no timestamp, every
+  reply counts.
+
+  Parameters
+  ----------
+  transcriptDir : str
+    The absolute path to the transcript directory.
+  sinceTimestamp : str, optional
+    The UTC timestamp up to which replies are ignored. None counts all.
+
+  Returns
+  -------
+  int
+    The grand total of tokens spent in the window.
+  """
+  total = 0
+  for began, usage in _replies(transcriptDir):
+    if sinceTimestamp is not None and began <= sinceTimestamp:
+      continue
+    for key in _TOKEN_KEYS:
+      total += usage.get(key, 0) or 0
   return total
 
 

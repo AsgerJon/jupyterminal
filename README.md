@@ -1,4 +1,4 @@
-[![Tokens](https://img.shields.io/badge/Tokens-297.5M-D97757)](https://claude.com/claude-code)
+[![Tokens](https://img.shields.io/badge/Tokens-1.2B-D97757)](https://claude.com/claude-code)
 [![codecov](https://codecov.io/gh/AsgerJon/jupyterminal/graph/badge.svg)](https://codecov.io/gh/AsgerJon/jupyterminal)
 [![PyPI version](https://img.shields.io/pypi/v/jupyterminal)](https://pypi.org/project/jupyterminal/)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)

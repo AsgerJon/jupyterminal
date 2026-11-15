@@ -213,8 +213,9 @@ PKGBUILD holds what pacman says then about what is each user's own.
 
 The token badge in `README.md` is stamped by the workflows of release
 candidates and releases from `bin/release_tooling/token_stats.json`.
-The count itself can only be taken on the machine that ran the Claude
-Code sessions, so before such a press:
+The count is taken from the transcripts of the Claude Code sessions,
+every reply once, and those are only on the machine that ran the
+sessions, so before such a press:
 
 ```terminaloutput
 python bin/release_tooling/token_count.py
