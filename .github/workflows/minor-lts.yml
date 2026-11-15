@@ -122,6 +122,9 @@ jobs:
     permissions:
       id-token: write   # trusted publishing (OIDC) to PyPI
       contents: write   # push the version changes and cut the release
+    outputs:
+      # For the job that packages the release for Arch Linux.
+      version: ${{ steps.version.outputs.version }}
     steps:
       # The branch tip rather than the commit the button was pressed on:
       # the version commit below has to sit on top of the lock commit the
@@ -144,6 +147,9 @@ jobs:
       # VERSION_INFO in the environment for the steps below.
       - name: Resolve next version
         run: python bin/release_tooling/version_get.py minor-lts VERSION_INFO
+      - name: Name the version for the jobs after this one
+        id: version
+        run: echo "version=$VERSION_INFO" >> "$GITHUB_OUTPUT"
 
       # Write VERSION_INFO into pyproject.toml (the build reads its
       # version from there), into src/jupyterminal/__init__.py (so
@@ -186,3 +192,14 @@ jobs:
           name: ${{ env.VERSION_INFO }}
           prerelease: false
           generateReleaseNotes: true
+
+  # The package for Arch Linux, built from the release that is out now
+  # and attached to it. If this job fails the release stands: the button
+  # 'arch-package' does the same for it once the cause is found.
+  arch:
+    needs: publish
+    permissions:
+      contents: write   # attach the package to the release
+    uses: ./.github/workflows/arch-package.yml
+    with:
+      tag: ${{ needs.publish.outputs.version }}

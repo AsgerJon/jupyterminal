@@ -37,9 +37,16 @@ your desktop, for you alone, started the way you started it just then.
 That entry is also what gives its windows their own icon in the task bar:
 on Wayland a desktop takes a window's icon from nowhere else.
 
-On Arch Linux the program is a package like any other, built from the
-recipe in `packaging/arch`. It comes with the menu entry and the icon for
-every user:
+On Arch Linux the program is a package like any other. It comes with the
+menu entry and the icon for every user. The newest release, as a package
+that is ready made:
+
+```sh
+sudo pacman -U https://github.com/AsgerJon/jupyterminal/releases/latest/download/jupyterminal-any.pkg.tar.zst
+```
+
+Or built on your own machine, from the recipe in `packaging/arch`, which
+you can read first:
 
 ```sh
 mkdir jupyterminal-package && cd jupyterminal-package
@@ -48,10 +55,11 @@ curl -O https://raw.githubusercontent.com/AsgerJon/jupyterminal/main/packaging/a
 makepkg -si
 ```
 
-The package follows the releases: the same lines install the newest one,
-and until the first release the first development build. A development
-build or a release candidate in between does not change what they
-install. `sudo pacman -Rns jupyterminal` removes the program again, with
+Both follow the releases: the same lines install the newest one later
+on, and a development build or a release candidate in between does not
+change what they install. Until the first release there is no package
+ready made, and the recipe installs the first development build.
+`sudo pacman -Rns jupyterminal` removes the program again, with
 everything the package installed. Your own settings in
 `~/.config/jupyterminal` are not the package's and stay. The recipe is
 kept here and not in the AUR.

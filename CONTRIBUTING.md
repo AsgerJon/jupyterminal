@@ -211,6 +211,15 @@ version than `0.0.1`, so the package names a development build
 everything the package installed; `jupyterminal.install` beside the
 PKGBUILD holds what pacman says then about what is each user's own.
 
+A tenth button, `arch-package`, builds that package for one release, by
+its tag, on Arch Linux itself: it installs the package with pacman,
+starts the program, removes it, checks that nothing is left, and
+attaches the package to the release on GitHub. The three `lts` buttons
+run it for the release they have just published; pressed by hand it does
+the same for any release, a development build included. It publishes no
+version and reads no safety. The package is a file to install with
+`pacman -U`, on purpose: no repository that pacman would follow.
+
 The token badge in `README.md` is stamped by the workflows of release
 candidates and releases from `bin/release_tooling/token_stats.json`.
 The count is taken from the transcripts of the Claude Code sessions,

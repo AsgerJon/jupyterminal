@@ -1,0 +1,99 @@
+# Arch package: the button that builds the package for Arch Linux from
+# 'packaging/arch' for one release, tries it and attaches it to that
+# release on GitHub. It publishes no version and changes nothing in the
+# repository, so it reads no safety. The three 'lts' workflows run it for
+# the release they have just published; pressed by hand, with the tag of
+# a release, it does the same for that one, a development build or a
+# release candidate included.
+#
+# The package is installed straight from the release:
+#
+#   sudo pacman -U https://github.com/AsgerJon/jupyterminal/releases/latest/download/jupyterminal-any.pkg.tar.zst
+#
+# 'latest' is the newest release that is no development build and no
+# release candidate. It is a file somebody chooses to install, not a
+# repository for pacman to follow.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: The release to package, by its tag (as in 0.0.1 or 0.0.1-dev0)
+        required: true
+        type: string
+  workflow_call:
+    inputs:
+      tag:
+        required: true
+        type: string
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    # Arch Linux itself: makepkg and pacman do the work, as they will on
+    # the machine of whoever installs the package.
+    container: archlinux:latest
+    permissions:
+      contents: write   # attach the package to the release
+    env:
+      TAG: ${{ inputs.tag }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Refuse what is no tag of a release
+        run: |
+          if ! printf '%s\n' "$TAG" | grep -Eqx '[0-9]+\.[0-9]+\.[0-9]+(-(dev|rc)[0-9]+)?'; then
+            echo "::error::'$TAG' is no tag of a release: 0.0.1, 0.0.1-rc0 or 0.0.1-dev0 is."
+            exit 1
+          fi
+      # What builds the package, and what looks it over and uploads it.
+      # What the program itself needs comes with the trial below.
+      - name: Install the tools
+        run: |
+          pacman -Syu --noconfirm --needed base-devel git github-cli namcap \
+            python-build python-installer python-setuptools python-wheel
+      - uses: actions/checkout@v7
+      # The recipe as it is on this commit, for the release that was
+      # asked for. makepkg refuses to work as root, so somebody else does
+      # it.
+      - name: Build the package
+        run: |
+          useradd --create-home builder
+          mkdir /tmp/package
+          cp packaging/arch/PKGBUILD packaging/arch/jupyterminal.install /tmp/package/
+          sed -i "s/^_tag=.*/_tag=$TAG/" /tmp/package/PKGBUILD
+          grep -x "_tag=$TAG" /tmp/package/PKGBUILD
+          chown -R builder /tmp/package
+          cd /tmp/package
+          runuser -u builder -- env PACKAGER="jupyterminal's release workflow" \
+            makepkg --nodeps --noconfirm
+          ls -l jupyterminal-*-any.pkg.tar.zst
+      # As a user would: pacman installs it, with what it depends on, the
+      # program starts, and pacman takes all of it away again.
+      - name: Install it, run it and remove it
+        run: |
+          cd /tmp/package
+          namcap PKGBUILD jupyterminal-*-any.pkg.tar.zst || true
+          pacman -U --noconfirm jupyterminal-*-any.pkg.tar.zst
+          jupyterminal --print-default-config > /tmp/config.toml
+          head -n 3 /tmp/config.toml
+          python -c "import jupyterminal; print('jupyterminal', jupyterminal.__version__)"
+          test -f /usr/share/applications/jupyterminal.desktop
+          test -f /usr/share/icons/hicolor/scalable/apps/jupyterminal.svg
+          test -f /usr/share/licenses/jupyterminal/LICENSE
+          pacman -Ql jupyterminal | wc -l
+          pacman -Rns --noconfirm jupyterminal
+          if pacman -Q jupyterminal 2>/dev/null; then exit 1; fi
+          left=$(find /usr -path '*jupyterminal*' -print)
+          if [ -n "$left" ]; then
+            echo "::error::Removing the package left these behind:"
+            printf '%s\n' "$left"
+            exit 1
+          fi
+      # Under its own name, and under one that stays the same from
+      # release to release, for the address above.
+      - name: Attach it to the release
+        run: |
+          cd /tmp/package
+          package=$(ls jupyterminal-*-any.pkg.tar.zst)
+          cp "$package" jupyterminal-any.pkg.tar.zst
+          gh release upload "$TAG" "$package" jupyterminal-any.pkg.tar.zst \
+            --clobber --repo "$GITHUB_REPOSITORY"
