@@ -17,7 +17,7 @@ pkgname=jupyterminal
 # publishes a release writes this line; nothing else in this file changes
 # from one release to the next.  Until the first release it names the
 # first development build, since there is nothing else to install.
-_tag=0.0.1-dev0
+_tag=0.0.1
 # pacman takes 0.0.1dev0 and 0.0.1rc0 for older than 0.0.1, and
 # 0.0.1.dev0 for newer.
 pkgver=${_tag//-/}

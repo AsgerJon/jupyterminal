@@ -10,4 +10,4 @@ be selected, copied and navigated to.
 * :mod:`jupyterminal.ui` - the Qt user interface.
 """
 
-__version__ = '0.0.1-rc0'
+__version__ = '0.0.1'
