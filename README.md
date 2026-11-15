@@ -3,7 +3,7 @@
 [![PyPI version](https://img.shields.io/pypi/v/jupyterminal)](https://pypi.org/project/jupyterminal/)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
-# jupyterminal v0.0.0
+# jupyterminal v0.0.1-dev0 (development build)
 
 A terminal emulator in which typing and copying work the way they do
 everywhere else on the desktop.
